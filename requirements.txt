@@ -1,0 +1,41 @@
+tensorflow==2.10.*
+keras
+
+# Install CUDA and cuDNN
+- conda install -c conda-forge cudatoolkit=11.2 cudnn=8.1.0
+
+deepface
+
+- conda install -c conda-forge dlib
+
+certifi
+click
+dotmap
+face-recognition
+face-recognition-models
+imutils
+requests
+pillow==10.2.0
+tqdm
+opencv-python
+protobuf==3.19.6
+scikit-image
+
+# Additional CUDA toolkit and libraries
+- conda install -c conda-forge cudatoolkit-dev
+- conda install -c conda-forge hnswlib
+- conda install -c conda-forge scikit-learn
+
+# PyTorch installation
+# torch==2.2.2 - install with:
+pip install torch==2.2.2 torchvision==0.17.2 torchaudio==2.2.2 --index-url https://download.pytorch.org/whl/cu118
+
+# ONNX Runtime GPU installation
+# onnxruntime-gpu - install with:
+pip install onnxruntime-gpu --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-11/pypi/simple/
+onnx==1.12.0
+numpy==1.26.4
+bytetracker-gml
+streamlit==1.22.0
+streamlit-webrtc
+conda install -c conda-forge nomkl
