@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Add Person - Face Recognition System</title>
+        <link rel="icon" type="image/png" href="/static/images/favicon.png">
+        <link href="https://cdn.jsdelivr.net/npm/@tailwindcss/typography@0.5.9/dist/typography.min.css" rel="stylesheet">
+        <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+        <link rel="stylesheet" href="/static/css/add_person.css">
+        <!-- Thêm script Tailwind -->
+        <script src="https://cdn.tailwindcss.com"></script>
+        <script>
+            tailwind.config = {
+                darkMode: 'class',
+                theme: {
+                    extend: {
+                        colors: {
+                            dark: {
+                                900: '#0d0d0d',
+                                800: '#1a1a1a',
+                                700: '#262626',
+                                600: '#404040',
+                            },
+                            primary: {
+                                500: '#3b82f6',
+                                600: '#2563eb',
+                            },
+                            success: {
+                                500: '#22c55e',
+                                600: '#16a34a',
+                            },
+                            warning: {
+                                500: '#f97316',
+                                600: '#ea580c',
+                            }
+                        }
+                    }
+                }
+            }
+        </script>
+</head>
+<body class="bg-slate-900 text-slate-100 min-h-screen flex flex-col">
+    <header class="bg-slate-800 p-4 border-b border-slate-700">
+        <div class="container mx-auto flex justify-between items-center">
+            <div class="flex items-center space-x-2">
+                <i class="fas fa-user-shield text-blue-500 text-2xl"></i>
+                <h1 class="text-xl font-bold">FaceSec</h1>
+            </div>
+            <div class="flex items-center space-x-4">
+                <div class="flex items-center space-x-2 cursor-pointer" id="showTechStackBtn">
+                    <i class="fas fa-layer-group text-blue-500"></i>
+                    <span class="text-sm">Tech Stack</span>
+                </div>
+                <div class="flex items-center space-x-2">
+                    <i class="fas fa-circle text-green-500 text-xs"></i>
+                    <span class="text-sm">WebRTC: <span id="connectionStatus">Disconnected</span></span>
+                </div>
+                <button id="theme-toggle" class="p-2 rounded-full hover:bg-slate-700">
+                    <i class="fas fa-moon"></i>
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <!-- Tech stack popup -->
+    <div id="techStackPopup" class="tech-stack-popup fixed top-16 right-4 z-50 p-4 w-80 hidden">
+        <div class="flex justify-between items-center mb-3">
+            <h3 class="font-semibold text-white">Technology Stack</h3>
+            <button id="closeTechStackBtn" class="text-slate-400 hover:text-white">
+                <i class="fas fa-times"></i>
+            </button>
+        </div>
+        <div class="space-y-3 text-sm">
+            <div>
+                <h4 class="text-blue-400 mb-1">Backend</h4>
+                <div class="flex flex-wrap">
+                    <span class="model-badge">FastAPI</span>
+                    <span class="model-badge">Python 3.10</span>
+                    <span class="model-badge">ONNX Runtime</span>
+                </div>
+            </div>
+            <div>
+                <h4 class="text-blue-400 mb-1">Models</h4>
+                <div class="flex flex-wrap">
+                    <span class="model-badge">SCRFD (Face Detection)</span>
+                    <span class="model-badge">MiniFASNet (Anti-spoofing)</span>
+                    <span class="model-badge">ArcFace (Embeddings)</span>
+                    <span class="model-badge">MobileNetV2 (Mask)</span>
+                </div>
+            </div>
+            <div>
+                <h4 class="text-blue-400 mb-1">Search Index</h4>
+                <div class="flex flex-wrap">
+                    <span class="model-badge">HNSW</span>
+                </div>
+            </div>
+            <div>
+                <h4 class="text-blue-400 mb-1">Communication</h4>
+                <div class="flex flex-wrap">
+                    <span class="model-badge">WebSocket</span>
+                    <span class="model-badge">WebRTC</span>
+                    <span class="model-badge">REST API</span>
+                </div>
+            </div>
+            <div>
+                <h4 class="text-blue-400 mb-1">Deployment</h4>
+                <div class="flex flex-wrap">
+                    <span class="model-badge">Docker</span>
+                    <span class="model-badge">Hugging Face Spaces</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <main class="flex-1 overflow-auto container mx-auto p-4 pr-6 flex flex-col lg:flex-row gap-6">
+        <!-- Left Section - Camera Feed -->
+        <section class="lg:w-2/3 h-full flex flex-col">
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="text-lg font-semibold flex items-center gap-2">
+                    <i class="fas fa-video"></i>
+                    Live WebRTC Feed
+                </h2>
+                <div class="flex items-center gap-2">
+                    <span id="recording-indicator" class="flex items-center gap-1 text-sm">
+                        <span class="w-2 h-2 bg-red-500 rounded-full ping"></span>
+                        <span>REC</span>
+                    </span>
+                    <span id="fps-counter" class="text-sm bg-slate-800 px-2 py-1 rounded">0 FPS</span>
+                    <button id="statsBtn" class="text-sm bg-slate-700 hover:bg-slate-600 px-2 py-1 rounded">
+                        <i class="fas fa-chart-line"></i>
+                    </button>
+                </div>
+            </div>
+            
+            <div class="camera-container bg-slate-800 rounded-lg overflow-hidden flex-1 relative">
+                <video id="video" autoplay muted playsinline></video>
+                <canvas id="canvas"></canvas>
+                
+                <div id="face-boxes-container"></div>
+                <div id="connection-status" class="connection-status disconnected">Disconnected</div>
+                
+                <div id="stats-popup" class="stats-popup hidden">
+                    <div class="grid grid-cols-2 gap-2">
+                        <div class="text-xs text-slate-300">Latency:</div>
+                        <div class="text-xs text-right" id="latency-stat">-</div>
+                        
+                        <div class="text-xs text-slate-300">Recognition:</div>
+                        <div class="text-xs text-right" id="recog-time-stat">-</div>
+                        
+                        <div class="text-xs text-slate-300">Anti-spoofing:</div>
+                        <div class="text-xs text-right" id="spoof-time-stat">-</div>
+                        
+                        <div class="text-xs text-slate-300">Detection:</div>
+                        <div class="text-xs text-right" id="detect-time-stat">-</div>
+                    </div>
+                </div>
+                
+                <div id="camera-overlay" class="absolute inset-0 flex items-center justify-center bg-slate-900/80">
+                    <div class="text-center p-6 bg-slate-800 rounded-lg max-w-md">
+                        <i class="fas fa-camera text-4xl mb-4 text-blue-500"></i>
+                        <h3 class="text-xl font-bold mb-2">Camera Access Required</h3>
+                        <p class="text-slate-300 mb-4">Click Start to enable camera and begin face recognition.</p>
+                        <button id="enable-camera-btn" class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded-lg font-medium">
+                            Start
+                        </button>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="mt-4 flex flex-wrap justify-center items-center gap-4">
+                <button id="start-btn" class="bg-green-600 hover:bg-green-700 px-6 py-2 rounded-lg font-medium flex items-center gap-2">
+                    <i class="fas fa-play"></i>
+                    Start
+                </button>
+                <button id="stop-btn" disabled class="bg-red-600 hover:bg-red-700 px-6 py-2 rounded-lg font-medium flex items-center gap-2">
+                    <i class="fas fa-stop"></i>
+                    Stop
+                </button>
+                <div class="flex items-center gap-2 bg-slate-800 px-3 py-2 rounded-lg">
+                    <i class="fas fa-video text-blue-500"></i>
+                    <select id="camera-select" class="bg-transparent border-none focus:ring-0 text-sm">
+                        <option value="">Loading cameras...</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="mt-4">
+                <h3 class="text-sm font-medium mb-2 text-slate-300">Active Features</h3>
+                <div class="flex flex-wrap gap-1">
+                    <div class="feature-tag enabled" id="feature-face-detection">
+                        <i class="fas fa-square-check"></i>
+                        <span>Face Detection</span>
+                    </div>
+                    <div class="feature-tag enabled" id="feature-recognition">
+                        <i class="fas fa-square-check"></i>
+                        <span>Recognition</span>
+                    </div>
+                    <div class="feature-tag enabled" id="feature-anti-spoofing">
+                        <i class="fas fa-square-check"></i>
+                        <span>Anti-spoofing</span>
+                    </div>
+                    <div class="feature-tag enabled" id="feature-mask-detection">
+                        <i class="fas fa-square-check"></i>
+                        <span>Mask Detection</span>
+                    </div>
+                    <div class="feature-tag enabled" id="feature-tracking">
+                        <i class="fas fa-square-check"></i>
+                        <span>Tracking</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+        
+        <!-- Right Section - Control Panel -->
+        <section class="lg:w-1/3 h-full flex flex-col gap-6">
+            <!-- Function Buttons -->
+            <div class="bg-slate-800 p-4 rounded-lg">
+                <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
+                    <i class="fas fa-sliders-h"></i>
+                    Control Panel
+                </h2>
+                
+                <div class="grid grid-cols-2 gap-3">
+                    <button id="add-person-btn" class="bg-blue-600 hover:bg-blue-700 p-3 rounded-lg flex flex-col items-center justify-center gap-1">
+                        <i class="fas fa-user-plus text-xl"></i>
+                        <span class="text-sm">Add Person</span>
+                    </button>
+                    
+                    <button id="update-dataset-btn" class="bg-purple-600 hover:bg-purple-700 p-3 rounded-lg flex flex-col items-center justify-center gap-1">
+                        <i class="fas fa-sync-alt text-xl"></i>
+                        <span class="text-sm">Update Dataset</span>
+                    </button>
+                    
+                    <button id="clean-temp-btn" class="bg-amber-600 hover:bg-amber-700 p-3 rounded-lg flex flex-col items-center justify-center gap-1">
+                        <i class="fas fa-trash-alt text-xl"></i>
+                        <span class="text-sm">Clean Temp</span>
+                    </button>
+                    
+                    <button id="test-notification-btn" class="bg-emerald-600 hover:bg-emerald-700 p-3 rounded-lg flex flex-col items-center justify-center gap-1">
+                        <i class="fas fa-bell text-xl"></i>
+                        <span class="text-sm">Test Alert</span>
+                    </button>
+                </div>
+            </div>
+            
+            <!-- Detected Faces List -->
+            <div class="bg-slate-800 p-4 rounded-lg flex-1 flex flex-col">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="text-lg font-semibold flex items-center gap-2">
+                        <i class="fas fa-users"></i>
+                        Detected Faces
+                    </h2>
+                    <span id="detected-count" class="bg-slate-700 text-xs px-2 py-1 rounded-full">0</span>
+                </div>
+                
+                <div id="detected-faces-list" class="scrollable-section overflow-y-auto custom-scrollbar flex-1 space-y-3">
+                    <div class="text-center py-8 text-slate-400">
+                        <i class="fas fa-user-slash text-3xl mb-2"></i>
+                        <p>No faces detected yet</p>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Dataset Users List -->
+            <div class="bg-slate-800 p-4 rounded-lg flex-1 flex flex-col">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="text-lg font-semibold flex items-center gap-2">
+                        <i class="fas fa-database"></i>
+                        Dataset Users
+                    </h2>
+                    <span id="dataset-count" class="bg-slate-700 text-xs px-2 py-1 rounded-full">0</span>
+                </div>
+                
+                <div id="dataset-users-list" class="scrollable-section overflow-y-auto custom-scrollbar flex-1 space-y-2">
+                    <div class="text-center py-8 text-slate-400">
+                        <i class="fas fa-user-plus text-3xl mb-2"></i>
+                        <p>No users in dataset</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </main>
+    
+    <!-- Notification Settings -->
+    <div id="notification-settings" class="fixed bottom-4 right-4 bg-slate-800 border border-slate-700 rounded-lg shadow-lg p-4 w-80">
+        <div class="flex justify-between items-center mb-3">
+            <h3 class="font-medium flex items-center gap-2">
+                <i class="fas fa-bell"></i>
+                Notification Settings
+            </h3>
+            <button id="close-notification-settings" class="text-slate-400 hover:text-white">
+                <i class="fas fa-times"></i>
+            </button>
+        </div>
+        
+        <div class="mb-4">
+            <label for="notification-email" class="block text-sm font-medium mb-2">Email for Alerts</label>
+            <input type="email" id="notification-email" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500" placeholder="your@email.com">
+            <p id="email-error" class="text-red-400 text-xs mt-1 hidden">Please enter a valid email address</p>
+        </div>
+        
+        <div class="flex justify-between items-center">
+            <div class="flex items-center">
+                <input type="checkbox" id="enable-notifications" class="w-4 h-4 text-blue-600 bg-slate-700 border-slate-600 rounded focus:ring-blue-500">
+                <label for="enable-notifications" class="ml-2 text-sm">Enable Alerts</label>
+            </div>
+            
+            <button id="save-notification-settings" class="bg-blue-600 hover:bg-blue-700 px-3 py-1 rounded text-sm">
+                Save
+            </button>
+        </div>
+    </div>
+
+    <script src="/static/js/index.js"></script>
+</body>
+</html>

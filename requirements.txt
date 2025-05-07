@@ -1,3 +1,4 @@
+numpy==1.26.4
 tensorflow==2.10.*
 keras
 
@@ -16,9 +17,9 @@ face-recognition-models
 imutils
 requests
 pillow==10.2.0
+protobuf==3.19.6
 tqdm
 opencv-python
-protobuf==3.19.6
 scikit-image
 
 # Additional CUDA toolkit and libraries
@@ -34,8 +35,14 @@ pip install torch==2.2.2 torchvision==0.17.2 torchaudio==2.2.2 --index-url https
 # onnxruntime-gpu - install with:
 pip install onnxruntime-gpu --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-11/pypi/simple/
 onnx==1.12.0
-numpy==1.26.4
 bytetracker-gml
-streamlit==1.22.0
-streamlit-webrtc
 conda install -c conda-forge nomkl
+
+fastapi
+uvicorn[standard]
+jinja2
+websockets
+python-multipart
+aiortc==1.11.0
+aiohttp==3.11.18
+av==14.3.0

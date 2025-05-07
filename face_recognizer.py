@@ -11,7 +11,7 @@ import hnswlib
 from config import EMBEDDINGS_PATH, EMBEDDINGS_SOURCE_INFO_PATH, EMBEDDINGS_HNSW_PATH
 from config import COSINE_SIMILARITY_THRESHOLD, MODEL_DIR, logger
 from preprocessing import resize_for_face_recognition
-from models.face_recognition.arcface import ArcFace
+from static.models.face_recognition.arcface import ArcFace
 
 class FaceRecognizer:
     """Face recognition system using ArcFace model and HNSWlib."""
@@ -35,7 +35,7 @@ class FaceRecognizer:
         self.threshold = threshold
         self.embedding_dim = 512  # ArcFace has 512 dimensions
         
-        # Dual cache system - track_id based and image hash based
+        # Cache system
         self.track_cache = {}  # track_id -> result
         self.image_cache = {}  # image_hash -> result (fallback)
         self.cache_ttl = cache_ttl
@@ -151,8 +151,8 @@ class FaceRecognizer:
             with_mask_count = sum(len(person_data.get("with_mask", {})) 
                                 for person_data in self.embeddings_db.values())
             
-            logger.info(f"Embeddings loaded for {person_count} people with "
-                       f"{no_mask_count} no_mask and {with_mask_count} with_mask embeddings")
+            logger.info(f"Embeddings loaded: {person_count} people, "
+                       f"{no_mask_count} no_mask, {with_mask_count} with_mask")
             
             self.embeddings_loaded = True
             return True
@@ -184,27 +184,25 @@ class FaceRecognizer:
             # Create new cosine index
             self._initialize_hnsw()
             self.index_id_to_info = []
-            index_id = 0
             
             # Count total elements to set max_elements
-            total_elements = 0
-            for person_name, data in self.embeddings_db.items():
-                for mask_status, poses in data.items():
-                    total_elements += len(poses)
+            total_elements = sum(
+                len(poses) for person_data in self.embeddings_db.values() 
+                for poses in person_data.values()
+            )
             
             # Resize index if needed
             if total_elements > self.hnsw_index.get_max_elements():
                 self.hnsw_index.resize_index(total_elements)
             
             # Add all embeddings to the index
+            index_id = 0
             for person_name, data in self.embeddings_db.items():
                 for mask_status, poses in data.items():
                     for pose_name, embedding in poses.items():
                         if embedding is not None:
-                            # Create a copy to avoid modifying the original
+                            # Normalize embedding for cosine similarity
                             emb_copy = np.array(embedding, dtype=np.float32)
-                            
-                            # Normalize for cosine similarity
                             norm = np.linalg.norm(emb_copy)
                             if norm > 0:
                                 emb_copy = emb_copy / norm
@@ -217,9 +215,8 @@ class FaceRecognizer:
             logger.info(f"Rebuilt HNSW index with {self.hnsw_index.get_current_count()} vectors")
             
             # Save rebuilt index
-            hnsw_path = EMBEDDINGS_HNSW_PATH
-            self.hnsw_index.save_index(hnsw_path)
-            logger.info(f"Saved rebuilt HNSW index to {hnsw_path}")
+            self.hnsw_index.save_index(EMBEDDINGS_HNSW_PATH)
+            logger.info(f"Saved rebuilt HNSW index to {EMBEDDINGS_HNSW_PATH}")
                 
         except Exception as e:
             logger.error(f"Failed to rebuild HNSW index: {e}")
@@ -264,47 +261,38 @@ class FaceRecognizer:
     def _clean_cache(self):
         """Remove expired entries from caches."""
         current_time = time.time()
-        expired_keys = []
         
-        # Find expired entries
-        for key, timestamp in self.cache_timestamps.items():
-            if current_time - timestamp > self.cache_ttl:
-                expired_keys.append(key)
+        # Find and process expired entries
+        expired_keys = [key for key, timestamp in self.cache_timestamps.items() 
+                       if current_time - timestamp > self.cache_ttl]
         
-        # Remove expired entries
         for key in expired_keys:
             prefix, actual_key = key.split('_', 1)
             
             if prefix == "track":
-                track_id = int(actual_key)
-                if track_id in self.track_cache:
-                    del self.track_cache[track_id]
+                self.track_cache.pop(int(actual_key), None)
             elif prefix == "img":
-                if actual_key in self.image_cache:
-                    del self.image_cache[actual_key]
-                    
-            if key in self.cache_timestamps:
-                del self.cache_timestamps[key]
+                self.image_cache.pop(actual_key, None)
+                
+            self.cache_timestamps.pop(key, None)
         
         # If still too many entries, remove oldest ones
         total_entries = len(self.track_cache) + len(self.image_cache)
         if total_entries > self.cache_size:
-            sorted_items = sorted(self.cache_timestamps.items(), key=lambda x: x[1])
+            # Get oldest entries
+            oldest_entries = sorted(self.cache_timestamps.items(), key=lambda x: x[1])
             to_remove = total_entries - self.cache_size
-            for i in range(min(to_remove, len(sorted_items))):
-                key = sorted_items[i][0]
+            
+            # Remove them
+            for key, _ in oldest_entries[:to_remove]:
                 prefix, actual_key = key.split('_', 1)
                 
                 if prefix == "track":
-                    track_id = int(actual_key)
-                    if track_id in self.track_cache:
-                        del self.track_cache[track_id]
+                    self.track_cache.pop(int(actual_key), None)
                 elif prefix == "img":
-                    if actual_key in self.image_cache:
-                        del self.image_cache[actual_key]
-                        
-                if key in self.cache_timestamps:
-                    del self.cache_timestamps[key]
+                    self.image_cache.pop(actual_key, None)
+                    
+                self.cache_timestamps.pop(key, None)
     
     def _compute_cache_key(self, face_img: np.ndarray) -> str:
         """Compute a cache key for a face image."""
@@ -330,54 +318,44 @@ class FaceRecognizer:
         """Recognize a face image using HNSW similarity search."""
         start_time = time.time()
         
+        # Handle invalid input
         if face_img is None or not self.model_loaded:
-            return {
-                "name": "unknown", 
-                "confidence": 0.0, 
-                "mask_status": mask_status,
-                "similarity": 0.0
-            }
-                
-        # Check if mask status changed - add this section
-        mask_status_changed = False
-        if track_id >= 0 and track_id in self.track_cache:
-            cached_mask_status = self.track_cache[track_id].get("mask_status", "unknown")
-            if cached_mask_status != mask_status:
-                mask_status_changed = True
-                logger.info(f"Mask status changed for track {track_id}: {cached_mask_status} -> {mask_status}")
+            return {"name": "unknown", "confidence": 0.0, 
+                   "mask_status": mask_status, "similarity": 0.0}
         
-        # Force refresh if mask status changed
-        force_refresh = force_refresh or mask_status_changed
-                
-        # Check track cache first - SKIP IF force_refresh is True
-        if not force_refresh and track_id >= 0 and track_id in self.track_cache:
-            self.cache_timestamps[f"track_{track_id}"] = time.time()
-            result = self.track_cache[track_id]
-            result["mask_status"] = mask_status  # Update mask status
-            return result
-            
-        # Check image cache as fallback - SKIP IF force_refresh is True
-        image_hash = self._compute_cache_key(face_img)
-        if not force_refresh and image_hash in self.image_cache:
-            self.cache_timestamps[f"img_{image_hash}"] = time.time()
-            result = self.image_cache[image_hash]
-            result["mask_status"] = mask_status  # Update mask status
-            
-            # Update track cache if we have a track_id
-            if track_id >= 0:
-                self.track_cache[track_id] = result
+        # Check for mask status change
+        if track_id >= 0 and track_id in self.track_cache:
+            cached_status = self.track_cache[track_id].get("mask_status", "unknown")
+            if cached_status != mask_status:
+                force_refresh = True
+        
+        # Check caches if not forcing refresh
+        if not force_refresh:
+            # Check track cache first
+            if track_id >= 0 and track_id in self.track_cache:
                 self.cache_timestamps[f"track_{track_id}"] = time.time()
+                result = self.track_cache[track_id]
+                result["mask_status"] = mask_status
+                return result
                 
-            return result
-            
-        # Load embeddings if not loaded yet
+            # Check image cache as fallback
+            image_hash = self._compute_cache_key(face_img)
+            if image_hash in self.image_cache:
+                self.cache_timestamps[f"img_{image_hash}"] = time.time()
+                result = self.image_cache[image_hash]
+                result["mask_status"] = mask_status
+                
+                # Update track cache if we have a track_id
+                if track_id >= 0:
+                    self.track_cache[track_id] = result
+                    self.cache_timestamps[f"track_{track_id}"] = time.time()
+                    
+                return result
+        
+        # Ensure embeddings are loaded
         if not self.embeddings_loaded and not self.load_embeddings():
-            return {
-                "name": "unknown", 
-                "confidence": 0.0, 
-                "mask_status": mask_status,
-                "similarity": 0.0
-            }
+            return {"name": "unknown", "confidence": 0.0, 
+                   "mask_status": mask_status, "similarity": 0.0}
             
         # Map mask status to database format
         db_mask_status = self._map_mask_status(mask_status)
@@ -385,25 +363,20 @@ class FaceRecognizer:
         # Extract embedding
         face_embedding = self.extract_embedding(face_img, landmarks)
         if face_embedding is None:
-            return {
-                "name": "unknown", 
-                "confidence": 0.0, 
-                "mask_status": mask_status,
-                "similarity": 0.0
-            }
+            return {"name": "unknown", "confidence": 0.0, 
+                   "mask_status": mask_status, "similarity": 0.0}
         
-        # Adjust threshold based on mask status
-        adjusted_threshold = self.threshold
+        # Adjust threshold for masks
+        threshold = self.threshold
         if mask_status in ["with_mask", "incorrect_mask"]:
-            adjusted_threshold = self.threshold * 0.83  # 17% reduction for masks
+            threshold *= 0.83  # 17% reduction for masks
             
-        # Recognize with HNSW using adjusted threshold
-        result = self._recognize_with_hnsw(face_embedding, db_mask_status, adjusted_threshold)
-        
-        # Add mask status to result
+        # Recognize with HNSW
+        result = self._recognize_with_hnsw(face_embedding, db_mask_status, threshold)
         result["mask_status"] = mask_status
         
         # Update caches
+        image_hash = self._compute_cache_key(face_img)
         if track_id >= 0:
             self.track_cache[track_id] = result
             self.cache_timestamps[f"track_{track_id}"] = time.time()
@@ -412,22 +385,18 @@ class FaceRecognizer:
         self.cache_timestamps[f"img_{image_hash}"] = time.time()
         
         # Track processing time
-        process_time = time.time() - start_time
-        self.process_times.append(process_time)
-        
+        self.process_times.append(time.time() - start_time)
         return result
 
-    def _recognize_with_hnsw(self, face_embedding: np.ndarray, db_mask_status: str = "no_mask", adjusted_threshold: float = None) -> Dict[str, Any]:
+    def _recognize_with_hnsw(self, face_embedding: np.ndarray, db_mask_status: str = "no_mask", 
+                           threshold: float = None) -> Dict[str, Any]:
         """Recognize face using HNSW index with cosine similarity."""
         # Check if HNSW index is available
         if self.hnsw_index is None or self.hnsw_index.get_current_count() == 0:
-            return {
-                "name": "unknown", 
-                "confidence": 0.0,
-                "similarity": 0.0
-            }
-            
-        threshold_to_use = adjusted_threshold if adjusted_threshold is not None else self.threshold
+            return {"name": "unknown", "confidence": 0.0, "similarity": 0.0}
+        
+        # Use provided threshold or default
+        threshold = threshold if threshold is not None else self.threshold
             
         # Search k nearest neighbors
         k = min(5, self.hnsw_index.get_current_count())
@@ -436,22 +405,21 @@ class FaceRecognizer:
         # Convert distances to similarities (1 - distance for cosine)
         similarities = 1 - np.array(distances)[0]
         
-        # Process results
+        # Find best match above threshold
         best_similarity = 0.0
         best_name = "unknown"
         
-        for i, (similarity, idx) in enumerate(zip(similarities, labels[0])):
+        for similarity, idx in zip(similarities, labels[0]):
             if idx < 0 or idx >= len(self.index_id_to_info):
                 continue
                 
-            person_name, mask_status, _ = self.index_id_to_info[idx]
+            person_name = self.index_id_to_info[idx][0]
             
-            # Apply threshold and update best match
-            if similarity >= threshold_to_use and similarity > best_similarity:
+            if similarity >= threshold and similarity > best_similarity:
                 best_similarity = similarity
                 best_name = person_name
         
-        # Use similarity directly as confidence
+        # Return recognition result
         return {
             "name": best_name,
             "confidence": float(best_similarity),
@@ -468,27 +436,15 @@ class FaceRecognizer:
         # Clean cache periodically
         self._clean_cache()
         
-        # Ensure track_ids has correct length or use defaults
-        if track_ids is None or len(track_ids) != len(faces):
-            track_ids = [-1] * len(faces)
-            
-        # Ensure landmarks_list has correct length or use None values
-        if landmarks_list and len(landmarks_list) != len(faces):
-            landmarks_list = None
-            
+        # Ensure inputs have correct length
+        track_ids = track_ids if track_ids and len(track_ids) == len(faces) else [-1] * len(faces)
+        landmarks = landmarks_list if landmarks_list and len(landmarks_list) == len(faces) else [None] * len(faces)
+        
+        # Process each face
         results = []
         for i, face in enumerate(faces):
-            # Get mask status if available
             mask_status = mask_statuses[i] if i < len(mask_statuses) else "unknown"
-            
-            # Get track ID if available
-            track_id = track_ids[i]
-            
-            # Get landmarks if available
-            landmarks = landmarks_list[i] if landmarks_list and i < len(landmarks_list) else None
-            
-            # Recognize face - pass the force_refresh parameter
-            result = self.recognize(face, track_id, mask_status, landmarks, force_refresh)
+            result = self.recognize(face, track_ids[i], mask_status, landmarks[i], force_refresh)
             results.append(result)
             
         return results
@@ -502,12 +458,12 @@ class FaceRecognizer:
         
     def get_performance_stats(self) -> Dict[str, Any]:
         """Get performance statistics."""
-        avg_process_time = sum(self.process_times) / len(self.process_times) if self.process_times else 0
-        avg_embedding_time = sum(self.embedding_times) / len(self.embedding_times) if self.embedding_times else 0
+        avg_process = np.mean(self.process_times) * 1000 if self.process_times else 0
+        avg_embedding = np.mean(self.embedding_times) * 1000 if self.embedding_times else 0
         
-        stats = {
-            "avg_process_time_ms": avg_process_time * 1000,
-            "avg_embedding_time_ms": avg_embedding_time * 1000,
+        return {
+            "avg_process_time_ms": avg_process,
+            "avg_embedding_time_ms": avg_embedding,
             "track_cache_size": len(self.track_cache),
             "image_cache_size": len(self.image_cache),
             "model_loaded": self.model_loaded,
@@ -515,5 +471,3 @@ class FaceRecognizer:
             "database_size": len(self.embeddings_db),
             "index_size": self.hnsw_index.get_current_count() if self.hnsw_index else 0
         }
-            
-        return stats

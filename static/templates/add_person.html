@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Add Person - Face Recognition System</title>
+        <link rel="icon" type="image/png" href="/static/images/favicon.png">
+        <link href="https://cdn.jsdelivr.net/npm/@tailwindcss/typography@0.5.9/dist/typography.min.css" rel="stylesheet">
+        <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+        <link rel="stylesheet" href="/static/css/add_person.css">
+        <!-- Thêm script Tailwind -->
+        <script src="https://cdn.tailwindcss.com"></script>
+        <script>
+            tailwind.config = {
+                darkMode: 'class',
+                theme: {
+                    extend: {
+                        colors: {
+                            dark: {
+                                900: '#0d0d0d',
+                                800: '#1a1a1a',
+                                700: '#262626',
+                                600: '#404040',
+                            },
+                            primary: {
+                                500: '#3b82f6',
+                                600: '#2563eb',
+                            },
+                            success: {
+                                500: '#22c55e',
+                                600: '#16a34a',
+                            },
+                            warning: {
+                                500: '#f97316',
+                                600: '#ea580c',
+                            }
+                        }
+                    }
+                }
+            }
+        </script>
+</head>
+<body class="bg-slate-900 text-slate-100 min-h-screen">
+    <!-- Back Button -->
+    <div class="back-button">
+        <a href="/" class="bg-slate-800 text-slate-100 px-4 py-2 rounded-md hover:bg-slate-700 flex items-center gap-2">
+            <i class="fas fa-arrow-left"></i>
+            Back to Dashboard
+        </a>
+    </div>
+
+    <div class="container mx-auto py-8 px-4">
+        <h1 class="text-3xl font-bold mb-8 text-center">Add Person to Recognition System</h1>
+        
+        <!-- Step 1: Enter Name -->
+        <div id="step1" class="bg-slate-800 p-6 rounded-lg shadow-md mb-8">
+            <h2 class="text-xl font-semibold mb-4">Step 1: Enter Person's Name</h2>
+            <div class="flex items-end gap-4">
+                <div class="flex-grow">
+                    <label for="personName" class="block text-sm font-medium text-slate-300 mb-1">Full Name</label>
+                    <input type="text" id="personName" class="w-full px-4 py-2 border border-slate-600 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 bg-slate-700 text-white">
+                </div>
+                <button id="startBtn" class="bg-blue-600 text-white px-6 py-2 rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed">
+                    Start Capture
+                </button>
+            </div>
+            <p id="nameError" class="mt-2 text-red-500 hidden">Please enter a valid name</p>
+        </div>
+        
+        <!-- Step 2: Capture Faces -->
+        <div id="step2" class="bg-slate-800 p-6 rounded-lg shadow-md mb-8 hidden">
+            <h2 class="text-xl font-semibold mb-2">Step 2: Capture Face Poses</h2>
+            <p id="poseInstructions" class="mb-4 text-slate-300"></p>
+            
+            <div class="flex flex-col md:flex-row gap-6">
+                <!-- Camera Feed Container -->
+                <div class="md:w-2/3">
+                    <div class="capture-area rounded-lg overflow-hidden bg-black relative">
+                        <video id="videoElement" class="w-full" autoplay playsinline></video>
+                        <canvas id="faceOverlay"></canvas>
+                        <div id="roiOverlay" class="roi-overlay"></div>
+                        <div id="poseOverlay" class="pose-indicator"></div>
+                        <div id="issuesOverlay" class="issues-overlay hidden"></div>
+                        <div id="countdownOverlay" class="countdown-overlay hidden"></div>
+                        <div id="flashOverlay" class="flash"></div>
+                        
+                        <!-- Camera Selection Dropdown -->
+                        <div class="camera-select-container">
+                            <select id="cameraSelect" class="camera-select">
+                                <option value="">Loading cameras...</option>
+                            </select>
+                        </div>
+                    </div>
+                    
+                    <div class="flex justify-between mt-4">
+                        <button id="manualCaptureBtn" class="bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed">
+                            <i class="fas fa-camera mr-2"></i>Capture Manually
+                        </button>
+                        <button id="cancelBtn" class="bg-red-600 text-white px-4 py-2 rounded-md hover:bg-red-700">
+                            <i class="fas fa-times mr-2"></i>Cancel
+                        </button>
+                    </div>
+                </div>
+                
+                <!-- Preview Panel -->
+                <div class="md:w-1/3">
+                    <div class="bg-slate-700 p-4 rounded-lg">
+                        <h3 class="text-lg font-medium mb-3">Captured Poses</h3>
+                        <div id="previewContainer" class="preview-container">
+                            <!-- Dynamically added preview items -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Step 3: Processing -->
+        <div id="step3" class="bg-slate-800 p-6 rounded-lg shadow-md mb-8 hidden">
+            <h2 class="text-xl font-semibold mb-4">Step 3: Processing</h2>
+            <div class="flex items-center justify-center py-8">
+                <div class="animate-spin rounded-full h-16 w-16 border-b-2 border-blue-600"></div>
+            </div>
+            <p class="text-center text-slate-300">
+                Saving captured images and generating masked versions.<br>
+                This may take a moment...
+            </p>
+        </div>
+        
+        <!-- Step 4: Completion -->
+        <div id="step4" class="bg-slate-800 p-6 rounded-lg shadow-md mb-8 hidden">
+            <div id="successMessage" class="hidden">
+                <div class="flex items-center mb-4">
+                    <div class="bg-green-600/20 p-2 rounded-full">
+                        <i class="fas fa-check text-green-500 text-2xl"></i>
+                    </div>
+                    <h2 class="text-xl font-semibold ml-3">Success!</h2>
+                </div>
+                <p id="successText" class="text-slate-300 mb-4"></p>
+            </div>
+            
+            <div id="errorMessage" class="hidden">
+                <div class="flex items-center mb-4">
+                    <div class="bg-red-600/20 p-2 rounded-full">
+                        <i class="fas fa-times text-red-500 text-2xl"></i>
+                    </div>
+                    <h2 class="text-xl font-semibold ml-3">Error</h2>
+                </div>
+                <p id="errorText" class="text-slate-300 mb-4"></p>
+            </div>
+            
+            <div class="flex justify-center mt-6">
+                <button id="doneBtn" class="bg-blue-600 text-white px-6 py-2 rounded-md hover:bg-blue-700">
+                    <i class="fas fa-check mr-2"></i>Done
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/add_person.js"></script>
+</body>
+</html>

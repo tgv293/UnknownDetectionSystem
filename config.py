@@ -12,11 +12,16 @@ logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("security_system")
 
+STUN_SERVERS = [
+    {"urls": "stun:stun.l.google.com:19302"},
+    {"urls": "stun:stun1.l.google.com:19302"}
+]
+
 # Đường dẫn thư mục
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATASET_DIR = os.path.join(BASE_DIR, "dataset")
-MODEL_DIR = os.path.join(BASE_DIR, "models")
-EMAILCONFIG_DIR = os.path.join(BASE_DIR, "email_config.json")
+MODEL_DIR = os.path.join(BASE_DIR,"static", "models")
+EMAILCONFIG_DIR = os.path.join(BASE_DIR, "config", "email_config.json")
 
 # Đường dẫn cho dataset hình ảnh
 DATASET_IMAGES_DIR = os.path.join(DATASET_DIR, "images")
@@ -44,25 +49,26 @@ MASK_DETECTION_THRESHOLD = 0.5      # Ngưỡng phát hiện khẩu trang
 def configure_gpu():
     """Cấu hình GPU cho hiệu suất tối ưu với TensorFlow và PyTorch"""
     try:
-        # Cấu hình TensorFlow GPU
-        physical_devices = tf.config.list_physical_devices('GPU')
-        if physical_devices:
-            tf.config.experimental.set_memory_growth(physical_devices[0], True)
-            logger.info("TensorFlow GPU memory growth enabled")
+        # Cấu hình TensorFlow
+        gpus = tf.config.list_physical_devices('GPU')
+        if gpus:
+            for gpu in gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+            logger.info(f"Đã tìm thấy {len(gpus)} GPU cho TensorFlow")
         else:
-            logger.info("No TensorFlow GPU found, using CPU")
+            logger.info("Không tìm thấy GPU cho TensorFlow, sử dụng CPU")
 
-        # Kiểm tra PyTorch GPU
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        if torch.cuda.is_available():
-            logger.info(f"PyTorch using GPU: {torch.cuda.get_device_name(0)}")
+        # Cấu hình PyTorch
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        if device == 'cuda':
+            logger.info(f"Sử dụng GPU cho PyTorch: {torch.cuda.get_device_name(0)}")
         else:
-            logger.info("PyTorch using CPU")
+            logger.info("Không tìm thấy GPU cho PyTorch, sử dụng CPU")
 
         return device
     except Exception as e:
-        logger.warning(f"GPU configuration error: {e}")
-        return torch.device('cpu')
+        logger.warning(f"Lỗi khi cấu hình GPU: {e}")
+        return 'cpu'
 
 # Khởi tạo thiết bị mặc định
 DEVICE = configure_gpu()

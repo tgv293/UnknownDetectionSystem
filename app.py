@@ -1,483 +1,647 @@
-import streamlit as st
-import cv2
 import os
-import time
-import pickle
 import shutil
-import subprocess
-from PIL import Image
+import json
+import time
+import logging
+import asyncio
+import cv2
 import numpy as np
-import tempfile
+from typing import List, Dict, Optional, Union
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File, Form, Request, BackgroundTasks
+from fastapi.responses import JSONResponse, HTMLResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel
+import uvicorn
+from pathlib import Path
+import base64
+import uuid
+from datetime import datetime
 
-# First Streamlit command must be set_page_config
-st.set_page_config(page_title="Face Recognition System", layout="wide")
+# Import components from the security system
+from recognize import RecognizerSystem, load_email_config
+from notification_service import NotificationService
+from config import EMAILCONFIG_DIR, logger
+from add_person import add_new_person
+import os
 
-# Import your existing modules
-from face_detector import FaceDetector
-import face_recognizer
-import face_tracker
-import anti_spoofing
-import mask_detection
-import preprocessing
-from utils.helpers import draw_bbox, draw_bbox_info
-from config import *
 
-# Khởi tạo Face Detector một lần khi app khởi động
-@st.cache_resource
-def load_face_detector():
-    scrfd_model = FaceDetector.load_models()
-    detector = FaceDetector(
-        preloaded_model=scrfd_model,
-        detection_threshold=FACE_DETECTION_THRESHOLD
-    )
-    return detector
+# Models for request/response
+class RecognitionResult(BaseModel):
+    success: bool
+    message: str
+    faces: Optional[List[Dict]] = None
+    performance: Optional[Dict] = None
 
-# Tải face detector
-face_detector_instance = load_face_detector()
+class SystemStatus(BaseModel):
+    status: str
+    camera_id: str
+    features: Dict[str, bool]
+    processing_fps: float
+    version: str = "1.0.0"
 
-st.title("Face Recognition System")
+class CleanupResult(BaseModel):
+    success: bool
+    deleted_count: int
+    remaining_count: int
+    message: str
 
-# Khởi tạo session state cho quá trình chụp ảnh
-if 'current_pose_idx' not in st.session_state:
-    st.session_state.current_pose_idx = 0
+# Initialize FastAPI app
+app = FastAPI(
+    title="Face Recognition Security System",
+    description="API for face recognition, unknown person detection, and security monitoring",
+    version="1.0.0"
+)
 
-if 'captured_images' not in st.session_state:
-    st.session_state.captured_images = {}
+# Serve static files
+app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/dataset", StaticFiles(directory="dataset"), name="dataset")
 
-if 'person_name' not in st.session_state:
-    st.session_state.person_name = ""
+# Template engine
+templates = Jinja2Templates(directory="static/templates")
 
-def main():
-    st.sidebar.title("Options")
-    app_mode = st.sidebar.selectbox("Choose the app mode", 
-        ["About", "Recognize Face", "Add New Person", "View Database"])
+# Global RecognizerSystem instance
+recognizer = None
+email_config = load_email_config(EMAILCONFIG_DIR)
+active_websockets = []
+
+# Background processing queue for WebRTC frames
+frame_queue = asyncio.Queue(maxsize=5)
+processing_lock = asyncio.Lock()
+is_processing_active = False
+
+# System initialization
+@app.on_event("startup")
+async def startup_event():
+    global recognizer
+    # Don't initialize the recognizer system at startup
+    recognizer = None
     
-    if app_mode == "About":
-        st.markdown("# Face Recognition System")
-        st.markdown("This application demonstrates face recognition with mask detection and anti-spoofing capabilities.")
-        
-    elif app_mode == "Recognize Face":
-        st.markdown("## Face Recognition")
-        run_recognition()
-        
-    elif app_mode == "Add New Person":
-        st.markdown("## Add New Person")
-        add_person()
-        
-    elif app_mode == "View Database":
-        st.markdown("## Database")
-        view_database()
-
-def run_recognition():
-    # Camera input options
-    source = st.sidebar.radio("Select Source", ["Webcam", "Upload Image"])
+    # Tạo tất cả các thư mục cần thiết
+    os.makedirs("temp_captures", exist_ok=True)
+    os.makedirs("dataset", exist_ok=True)
+    os.makedirs("config", exist_ok=True)
     
-    if source == "Webcam":
-        run_webcam_recognition()
-    else:
-        run_image_recognition()
-
-def run_webcam_recognition():
-    stframe = st.empty()
-    start_btn = st.button("Start Recognition")
-    stop_btn = st.button("Stop")
+    # Đảm bảo các thư mục có quyền ghi
+    try:
+        # Tạo file test để kiểm tra quyền ghi
+        test_file_path = os.path.join("temp_captures", "test_write.txt")
+        with open(test_file_path, 'w') as f:
+            f.write("Test write access")
+        # Xóa file test
+        if os.path.exists(test_file_path):
+            os.remove(test_file_path)
+        logger.info("Write access verified for required directories")
+    except Exception as e:
+        logger.error(f"Write access error: {e}")
     
-    if start_btn:
-        cap = cv2.VideoCapture(0)
-        while cap.isOpened() and not stop_btn:
-            ret, frame = cap.read()
-            if not ret:
-                st.error("Cannot read from webcam")
-                break
-                
-            # Process frame using your existing modules
-            face_boxes, _, _ = face_detector_instance.process_frame(frame)
-            
-            # Draw bounding boxes and info
-            result_img = frame.copy()
-            for box in face_boxes:
-                draw_bbox_info(
-                    result_img,
-                    bbox=box,
-                    similarity=1.0,
-                    name="Face",
-                    color=(0, 255, 0)
-                )
-            
-            # Display the frame
-            stframe.image(result_img, channels="BGR", use_column_width=True)
-            
-        cap.release()
+    logger.info("Application started - waiting for user to start recognition system")
 
-def run_image_recognition():
-    uploaded_file = st.file_uploader("Choose an image...", type=["jpg", "jpeg", "png"])
+# System shutdown
+@app.on_event("shutdown")
+async def shutdown_event():
+    global recognizer
+    if recognizer:
+        # Clean up resources
+        logger.info("Shutting down recognition system")
+        recognizer = None
+
+
+# Main routes
+@app.get("/", response_class=HTMLResponse)
+async def get_index(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
+
+
+# API endpoints
+@app.get("/api/status", response_model=SystemStatus)
+async def get_status():
+    global recognizer
     
-    if uploaded_file is not None:
-        image = Image.open(uploaded_file)
-        st.image(image, caption='Uploaded Image', use_column_width=True)
-        
-        # Convert PIL Image to OpenCV format
-        frame = np.array(image)
-        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-        
-        # Process with your modules
-        face_boxes, _, _ = face_detector_instance.process_frame(frame)
-        
-        # Draw detection results
-        result_img = frame.copy()
-        for box in face_boxes:
-            draw_bbox_info(
-                result_img,
-                bbox=box,
-                similarity=1.0,
-                name="Face",
-                color=(0, 255, 0)
+    # Initialize if not already initialized
+    if not recognizer:
+        try:
+            recognizer = RecognizerSystem(
+                frame_skip=2,
+                use_anti_spoofing=True,
+                use_mask_detection=True,
+                use_recognition=True,
+                use_tracking=True,
+                use_notification=True,
+                email_config=email_config,
+                verbose=False
             )
-            
-        # Convert back to RGB for display
-        result_img_rgb = cv2.cvtColor(result_img, cv2.COLOR_BGR2RGB)
-        st.image(result_img_rgb, caption="Detection Results", use_column_width=True)
-        
-        st.write(f"Detected {len(face_boxes)} faces")
+            recognizer.set_camera_id("web")
+        except Exception as e:
+            logger.error(f"Failed to initialize recognition system: {e}")
+            raise HTTPException(status_code=500, detail=f"System initialization failed: {str(e)}")
+    
+    # Return system status
+    return SystemStatus(
+        status="active",
+        camera_id=recognizer.camera_id,
+        features={
+            "anti_spoofing": recognizer.use_anti_spoofing,
+            "mask_detection": recognizer.use_mask_detection,
+            "face_recognition": recognizer.use_recognition,
+            "face_tracking": recognizer.use_tracking,
+            "notifications": recognizer.use_notification
+        },
+        processing_fps=recognizer.fps
+    )
 
-def add_person():
-    # Define pose information
-    poses = ["front", "left", "right", "down"]
-    pose_instructions = {
-        "front": "Look straight at the camera",
-        "left": "Turn your face to the left",
-        "right": "Turn your face to the right",
-        "down": "Tilt your head down"
-    }
+
+@app.post("/api/process", response_model=RecognitionResult)
+async def process_image(file: UploadFile = File(...)):
+    global recognizer
     
-    # Get person name if not already set
-    if not st.session_state.person_name:
-        st.subheader("Thêm người mới vào cơ sở dữ liệu")
-        person_name = st.text_input("Nhập tên người")
-        
-        if person_name:
-            # Check if person already exists
-            person_dir = os.path.join(DATASET_IMAGES_DIR, person_name)
-            if os.path.exists(person_dir):
-                st.warning(f"Người dùng '{person_name}' đã tồn tại. Dữ liệu hiện tại sẽ bị ghi đè!")
-                overwrite = st.radio("Bạn có muốn tiếp tục?", ["Không", "Có"])
-                if overwrite == "Có":
-                    st.session_state.person_name = person_name
-            else:
-                st.session_state.person_name = person_name
+    # Initialize if not already initialized
+    if not recognizer:
+        try:
+            recognizer = RecognizerSystem(
+                frame_skip=2,
+                use_anti_spoofing=True,
+                use_mask_detection=True,
+                use_recognition=True,
+                use_tracking=True,
+                use_notification=True,
+                email_config=email_config,
+                verbose=False
+            )
+            recognizer.set_camera_id("api")
+        except Exception as e:
+            logger.error(f"Failed to initialize recognition system: {e}")
+            return RecognitionResult(
+                success=False,
+                message=f"System initialization failed: {str(e)}"
+            )
     
-    # If name is set, proceed with image capture
-    if st.session_state.person_name:
-        st.subheader(f"Thêm ảnh cho người dùng: {st.session_state.person_name}")
+    try:
+        # Read and process the image
+        contents = await file.read()
+        nparr = np.frombuffer(contents, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         
-        # Get current pose
-        current_pose = poses[st.session_state.current_pose_idx]
+        if img is None:
+            return RecognitionResult(
+                success=False,
+                message="Invalid image format"
+            )
         
-        # Show instructions for current pose
-        with st.container():
-            st.subheader(f"Góc chụp hiện tại: **{current_pose.upper()}**")
-            st.info(f"Hướng dẫn: {pose_instructions[current_pose]}")
+        # Process the frame
+        start_time = time.time()
+        _, face_results = recognizer.process_frame(img)
+        process_time = time.time() - start_time
+        
+        # Clean results for JSON serialization
+        clean_results = []
+        for face in face_results:
+            # Convert numpy arrays to lists
+            bbox = face.get("bbox", []).tolist() if hasattr(face.get("bbox", []), "tolist") else face.get("bbox", [])
             
-            # Upload image for current pose
-            uploaded_file = st.file_uploader(f"Tải lên ảnh cho góc chụp {current_pose}", 
-                                            type=["jpg", "jpeg", "png"], 
-                                            key=f"upload_{current_pose}")
+            # Tạo kết quả sạch ban đầu không có face_image
+            face_result = {k: v for k, v in face.items() if k != 'face_image'}
+            face_result["bbox"] = bbox
             
-            # Process uploaded image
-            if uploaded_file:
-                # Create temp directory
-                temp_dir = os.path.join("temp_captures", st.session_state.person_name, "no_mask")
-                os.makedirs(temp_dir, exist_ok=True)
-                
-                # Convert and save uploaded image
-                image = Image.open(uploaded_file)
-                img_array = np.array(image)
-                
-                # Convert RGB to BGR for OpenCV if necessary
-                if len(img_array.shape) == 3 and img_array.shape[2] == 3:
-                    img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
-                
-                # Save image
-                save_path = os.path.join(temp_dir, f"{current_pose}.jpg")
-                cv2.imwrite(save_path, img_array, [cv2.IMWRITE_JPEG_QUALITY, 95])
-                st.session_state.captured_images[current_pose] = save_path
-                
-                # Display uploaded image
-                st.image(image, caption=f"{current_pose} image", width=300)
-                
-                # Add buttons to confirm or retake
-                col1, col2 = st.columns(2)
-                with col1:
-                    if st.button("Chụp lại", key=f"retake_{current_pose}"):
-                        if current_pose in st.session_state.captured_images:
-                            del st.session_state.captured_images[current_pose]
-                
-                with col2:
-                    if st.button("Tiếp tục", key=f"next_{current_pose}"):
-                        if st.session_state.current_pose_idx < len(poses) - 1:
-                            st.session_state.current_pose_idx += 1
-                            st.experimental_rerun()
-        
-        # Display progress
-        progress_text = f"Đã chụp: {len(st.session_state.captured_images)}/{len(poses)} ảnh"
-        st.progress(len(st.session_state.captured_images) / len(poses))
-        st.caption(progress_text)
-        
-        # Display captured images
-        if st.session_state.captured_images:
-            st.subheader("Ảnh đã chụp:")
-            cols = st.columns(len(poses))
-            
-            for i, pose in enumerate(poses):
-                if pose in st.session_state.captured_images:
-                    img_path = st.session_state.captured_images[pose]
-                    if os.path.exists(img_path):
-                        with cols[i]:
-                            img = Image.open(img_path)
-                            st.image(img, caption=f"{pose}", width=150)
-        
-        # Process all images when complete
-        if len(st.session_state.captured_images) == len(poses):
-            if st.button("Hoàn thành và xử lý tất cả ảnh"):
-                with st.spinner("Đang xử lý..."):
-                    # Process captured faces
-                    process_status = process_captured_faces(st.session_state.person_name, st.session_state.captured_images)
+            # Thêm mới: Chuyển đổi face_image sang base64 nếu có
+            if "face_image" in face and face["face_image"] is not None:
+                try:
+                    # Encode ảnh khuôn mặt dạng JPEG và chuyển sang base64
+                    _, buffer = cv2.imencode('.jpg', face["face_image"])
+                    face_result["image"] = f"data:image/jpeg;base64,{base64.b64encode(buffer).decode('utf-8')}"
+                except Exception as e:
+                    logger.error(f"Error encoding face image: {e}")
+                    face_result["image"] = None
                     
-                    if process_status:
-                        # Reset state for new entry
-                        st.session_state.current_pose_idx = 0
-                        st.session_state.captured_images = {}
-                        st.session_state.person_name = ""
-                        
-                        st.balloons()
-                        st.success("Đã thêm người dùng mới thành công!")
-                        
-                        # Add option to create embeddings
-                        if st.button("Tạo Embeddings Ngay"):
-                            try:
-                                with st.spinner("Đang tạo embeddings..."):
-                                    result = subprocess.run(["python", "create_embeddings.py"], 
-                                                         capture_output=True, text=True, check=True)
-                                    st.success("Đã tạo embeddings thành công!")
-                                    st.code(result.stdout)
-                            except subprocess.CalledProcessError as e:
-                                st.error(f"Lỗi khi tạo embeddings: {e}")
-                                st.code(e.stderr)
-                    else:
-                        st.error("Có lỗi xảy ra trong quá trình xử lý ảnh!")
-
-def process_captured_faces(person_name, captured_images):
-    try:
-        # Create directories
-        person_dir = os.path.join(DATASET_IMAGES_DIR, person_name)
-        no_mask_dir = os.path.join(person_dir, "no_mask")
+            clean_results.append(face_result)
         
-        # Check if person exists
-        if os.path.exists(person_dir):
-            shutil.rmtree(person_dir)
-        
-        # Create directories
-        os.makedirs(no_mask_dir, exist_ok=True)
-        
-        # Copy captured images
-        for pose, src_path in captured_images.items():
-            if os.path.exists(src_path):
-                dst_path = os.path.join(no_mask_dir, f"{pose}.jpg")
-                shutil.copy2(src_path, dst_path)
-        
-        # Create masked versions using ImageProcessor from add_person.py
-        with_mask_dir = os.path.join(person_dir, "with_mask")
-        os.makedirs(with_mask_dir, exist_ok=True)
-        
-        # Import ImageProcessor from add_person
-        from add_person import ImageProcessor
-        
-        # Create masked versions
-        mask_types = ["surgical", "N95", "cloth"]
-        success, mask_count = ImageProcessor.create_masked_dataset(person_name, no_mask_dir, mask_types)
-        
-        # Show results
-        if success:
-            st.success(f"""
-            ### Thông tin Dataset:
-            - Người dùng: {person_name}
-            - Số ảnh không khẩu trang: {len(captured_images)}
-            - Số ảnh có khẩu trang: {mask_count}
-            - Loại khẩu trang: {', '.join(mask_types)}
-            
-            Bạn cần chạy create_embeddings.py để hoàn thành quá trình.
-            """)
-            return True
-        else:
-            st.error("Không thể tạo ảnh có khẩu trang.")
-            return False
-            
-    except Exception as e:
-        st.error(f"Lỗi khi xử lý ảnh: {str(e)}")
-        return False
-
-def view_database():
-    """Hiển thị cơ sở dữ liệu khuôn mặt."""
-    st.subheader("Face Recognition Database")
+        return RecognitionResult(
+            success=True,
+            message="Image processed successfully",
+            faces=clean_results,
+            performance={"process_time": process_time, "fps": recognizer.fps}
+        )
     
-    # Kiểm tra các file embedding tồn tại
-    if not os.path.exists(EMBEDDINGS_PATH):
-        st.warning(f"Không tìm thấy file embedding tại {EMBEDDINGS_PATH}")
-        
-        # Thêm kiểm tra thư mục hình ảnh
-        if os.path.exists(DATASET_IMAGES_DIR):
-            persons = [d for d in os.listdir(DATASET_IMAGES_DIR) if os.path.isdir(os.path.join(DATASET_IMAGES_DIR, d))]
-            if persons:
-                st.info(f"Tìm thấy {len(persons)} người trong thư mục hình ảnh nhưng chưa tạo embeddings.")
-                st.write("Danh sách người: " + ", ".join(persons))
-                
-                with st.expander("Xem hướng dẫn tạo embeddings"):
-                    st.code("python create_embeddings.py", language="bash")
-        return
-        
+    except Exception as e:
+        logger.error(f"Error processing image: {e}")
+        return RecognitionResult(
+            success=False,
+            message=f"Error processing image: {str(e)}"
+        )
+
+
+@app.delete("/api/cleanup/temp_captures", response_model=CleanupResult)
+async def cleanup_temp_captures(days: int = 0):
+    """Delete all files and folders in temp_captures directory immediately.
+    
+    Args:
+        days: Parameter kept for API compatibility but ignored - all content is deleted regardless.
+    """
     try:
-        # Tải dữ liệu embeddings
-        with open(EMBEDDINGS_PATH, 'rb') as f:
-            data = pickle.load(f)
-            
-        # Tải thêm thông tin về nguồn ảnh nếu có
-        source_info = {}
-        if os.path.exists(EMBEDDINGS_SOURCE_INFO_PATH):
+        temp_dir = Path("temp_captures")
+        
+        if not temp_dir.exists():
+            return CleanupResult(
+                success=True,
+                deleted_count=0,
+                remaining_count=0,
+                message="No temp_captures directory found"
+            )
+        
+        deleted_count = 0
+        
+        # Delete all files first
+        for file_path in list(temp_dir.glob("**/*")):
+            if file_path.is_file():
+                try:
+                    file_path.unlink()
+                    deleted_count += 1
+                except Exception as e:
+                    logger.warning(f"Could not delete file {file_path}: {e}")
+        
+        # Then delete all directories (bottom-up to handle nested dirs)
+        for dir_path in sorted([p for p in temp_dir.glob("**/*") if p.is_dir()], 
+                              key=lambda p: len(str(p).split(os.sep)), reverse=True):
+            if dir_path != temp_dir:
+                try:
+                    shutil.rmtree(dir_path)
+                    deleted_count += 1
+                except Exception as e:
+                    logger.warning(f"Could not delete directory {dir_path}: {e}")
+        
+        # Remove dependency on recognizer system
+        # Don't call recognizer.notification_service.cleanup_temp_captures()
+        
+        message = f"Successfully deleted all {deleted_count} items in temporary captures"
+        logger.info(message)
+        
+        return CleanupResult(
+            success=True,
+            deleted_count=deleted_count,
+            remaining_count=0,  # Should be 0 after full cleanup
+            message=message
+        )
+    
+    except Exception as e:
+        logger.error(f"Error cleaning temp_captures: {e}")
+        return CleanupResult(
+            success=False,
+            deleted_count=0,
+            remaining_count=-1,
+            message=f"Error cleaning temp_captures: {str(e)}"
+        )
+        
+@app.post("/api/reset_caches")
+async def reset_caches():
+    """Reset all caches in the recognition system."""
+    if not recognizer:
+        raise HTTPException(status_code=404, detail="Recognition system not initialized")
+    
+    try:
+        recognizer.reset_caches()
+        return {"success": True, "message": "All caches reset successfully"}
+    except Exception as e:
+        logger.error(f"Error resetting caches: {e}")
+        raise HTTPException(status_code=500, detail=f"Error resetting caches: {str(e)}")
+
+
+# WebSocket for real-time communication
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    global recognizer, active_websockets, is_processing_active
+    
+    await websocket.accept()
+    active_websockets.append(websocket)
+    
+    try:
+        # Initialize recognizer if needed
+        if not recognizer:
             try:
-                with open(EMBEDDINGS_SOURCE_INFO_PATH, 'rb') as f:
-                    source_info = pickle.load(f)
+                recognizer = RecognizerSystem(
+                    frame_skip=1,  # Lower for real-time WebSocket
+                    use_anti_spoofing=True,
+                    use_mask_detection=True,
+                    use_recognition=True,
+                    use_tracking=True,
+                    use_notification=True,
+                    email_config=email_config,
+                    verbose=False
+                )
+                recognizer.set_camera_id("websocket")
             except Exception as e:
-                st.warning(f"Không thể đọc file source_info: {e}")
+                logger.error(f"Failed to initialize recognition system: {e}")
+                await websocket.send_json({
+                    "type": "error",
+                    "message": f"System initialization failed: {str(e)}"
+                })
+                return
         
-        # Xác định cấu trúc dữ liệu
-        if isinstance(data, dict) and "embeddings_db" in data:
-            embeddings_db = data["embeddings_db"]
-            model_info = data.get("model", "Unknown")
-            augmentation = "Có" if data.get("with_augmentation", False) else "Không"
-        else:
-            embeddings_db = data
-            model_info = "Unknown"
-            augmentation = "Không xác định"
+        # Start background processing if not already running
+        if not is_processing_active:
+            is_processing_active = True
+            asyncio.create_task(process_frame_queue())
+        
+        # WebSocket communication loop
+        while True:
+            # Receive message from client
+            data = await websocket.receive_text()
+            message = json.loads(data)
             
-        # Hiển thị thông tin chung về database
-        st.info(f"""
-        **Thông tin Database:**
-        - Model sử dụng: {model_info}
-        - Sử dụng augmentation: {augmentation}
-        - Số người trong database: {len(embeddings_db)}
-        - File embeddings: {os.path.basename(EMBEDDINGS_PATH)}
-        - Index embeddings: {os.path.basename(EMBEDDINGS_HNSW_PATH)}
-        """)
-        
-        # Hiển thị thông tin chi tiết của từng người trong database
-        st.subheader("Danh sách người trong database:")
-        
-        # Tạo bảng thông tin tóm tắt
-        summary_data = {
-            "Người": [],
-            "Ảnh không khẩu trang": [],
-            "Ảnh có khẩu trang": [],
-            "Combined embeddings": []
-        }
-        
-        for person, data in embeddings_db.items():
-            no_mask_count = len([p for p in data["no_mask"] if p != "combined"])
-            with_mask_count = len([p for p in data["with_mask"] if p != "combined"])
-            
-            combined_count = 0
-            if "combined" in data["no_mask"]:
-                combined_count += 1
-            if "combined" in data["with_mask"]:
-                combined_count += 1
+            if message["type"] == "frame":
+                # Process video frame
+                image_data = message["data"].split(",")[1]  # Remove data:image/jpeg;base64,
                 
-            summary_data["Người"].append(person)
-            summary_data["Ảnh không khẩu trang"].append(no_mask_count)
-            summary_data["Ảnh có khẩu trang"].append(with_mask_count) 
-            summary_data["Combined embeddings"].append(combined_count)
-        
-        st.dataframe(summary_data)
-        
-        # Chức năng xem chi tiết cho từng người
-        st.subheader("Chi tiết theo người:")
-        selected_person = st.selectbox("Chọn người để xem chi tiết:", list(embeddings_db.keys()))
-        
-        if selected_person:
-            person_data = embeddings_db[selected_person]
+                # Add to processing queue
+                if frame_queue.qsize() < frame_queue.maxsize:
+                    await frame_queue.put((websocket, image_data))
+                # Otherwise skip (to avoid lag)
             
-            # Hiển thị thông tin chi tiết về các pose
-            st.markdown(f"### {selected_person}")
-            
-            # Tab cho không khẩu trang và có khẩu trang
-            tab1, tab2 = st.tabs(["Không khẩu trang", "Có khẩu trang"])
-            
-            with tab1:
-                if person_data["no_mask"]:
-                    st.write(f"Số lượng embeddings: {len(person_data['no_mask'])}")
-                    
-                    # Hiển thị các pose cụ thể
-                    poses = list(person_data["no_mask"].keys())
-                    st.json(poses)
-                    
-                    # Hiển thị ảnh gốc nếu có
-                    if os.path.exists(DATASET_IMAGES_DIR):
-                        person_dir = os.path.join(DATASET_IMAGES_DIR, selected_person)
-                        no_mask_dir = os.path.join(person_dir, "no_mask")
-                        
-                        if os.path.exists(no_mask_dir):
-                            st.subheader("Ảnh gốc")
-                            pose_images = [f for f in os.listdir(no_mask_dir) if f.endswith(('.jpg', '.png'))]
-                            
-                            if pose_images:
-                                cols = st.columns(min(4, len(pose_images)))
-                                for i, img_name in enumerate(pose_images):
-                                    img_path = os.path.join(no_mask_dir, img_name)
-                                    cols[i % 4].image(img_path, caption=img_name, width=150)
-                            else:
-                                st.write("Không tìm thấy ảnh gốc")
-                else:
-                    st.write("Không có dữ liệu khuôn mặt không khẩu trang")
-                    
-            with tab2:
-                if person_data["with_mask"]:
-                    st.write(f"Số lượng embeddings: {len(person_data['with_mask'])}")
-                    
-                    # Hiển thị các pose cụ thể
-                    poses = list(person_data["with_mask"].keys())
-                    st.json(poses)
-                    
-                    # Hiển thị ảnh có khẩu trang nếu có
-                    if os.path.exists(DATASET_IMAGES_DIR):
-                        person_dir = os.path.join(DATASET_IMAGES_DIR, selected_person)
-                        with_mask_dir = os.path.join(person_dir, "with_mask")
-                        
-                        if os.path.exists(with_mask_dir):
-                            st.subheader("Ảnh có khẩu trang")
-                            mask_images = [f for f in os.listdir(with_mask_dir) if f.endswith(('.jpg', '.png'))]
-                            
-                            if mask_images:
-                                mask_types = set()
-                                for img_name in mask_images:
-                                    if "_" in img_name:
-                                        mask_type = img_name.split("_")[-1].split(".")[0]
-                                        mask_types.add(mask_type)
-                                
-                                # Display images by mask type
-                                for mask_type in mask_types:
-                                    st.subheader(f"Loại khẩu trang: {mask_type}")
-                                    type_images = [f for f in mask_images if f.endswith(f"_{mask_type}.jpg")]
-                                    
-                                    cols = st.columns(min(4, len(type_images)))
-                                    for i, img_name in enumerate(type_images):
-                                        img_path = os.path.join(with_mask_dir, img_name)
-                                        cols[i % 4].image(img_path, caption=img_name.split("_")[0], width=150)
-                            else:
-                                st.write("Không tìm thấy ảnh có khẩu trang")
-                else:
-                    st.write("Không có dữ liệu khuôn mặt có khẩu trang")
+            elif message["type"] == "command":
+                # Handle commands
+                command = message["command"]
                 
+                if command == "reset_caches":
+                    recognizer.reset_caches()
+                    await websocket.send_json({
+                        "type": "command_result",
+                        "command": "reset_caches",
+                        "success": True
+                    })
+                
+                elif command == "embeddings_complete":
+                    # This will be sent from the background task when complete
+                    await websocket.send_json({
+                        "type": "command_result",
+                        "command": "embeddings_complete",
+                        "success": True,
+                        "message": "Embeddings have been regenerated successfully"
+                    })
+                   
+                elif command == "cleanup_temp":
+                    days = message.get("days", 0)
+                    result = await cleanup_temp_captures(days)
+                    await websocket.send_json({
+                        "type": "command_result",
+                        "command": "cleanup_temp",
+                        "success": result.success,
+                        "data": result.dict()
+                    })
+                    
+    except WebSocketDisconnect:
+        # Handle client disconnect
+        logger.info(f"WebSocket disconnected - removing from active connections")
+        if websocket in active_websockets:
+            active_websockets.remove(websocket)
     except Exception as e:
-        st.error(f"Không thể đọc database: {str(e)}")
-        st.warning("Database có thể bị hỏng hoặc không hợp lệ.")
+        logger.error(f"WebSocket error: {e}")
+        # Try to send error message
+        try:
+            await websocket.send_json({
+                "type": "error",
+                "message": f"Server error: {str(e)}"
+            })
+        except:
+            pass
+        # Clean up
+        if websocket in active_websockets:
+            active_websockets.remove(websocket)
 
+
+# Background task to process frames from the queue
+async def process_frame_queue():
+    global recognizer, is_processing_active, frame_queue
+    
+    try:
+        while is_processing_active:
+            if frame_queue.empty():
+                await asyncio.sleep(0.01)
+                continue
+            
+            websocket, image_data = await frame_queue.get()
+            
+            # Skip processing if websocket is closed or removed from active_websockets
+            if websocket not in active_websockets:
+                frame_queue.task_done()  # Make sure to mark task as done
+                continue
+            
+            # Process frame
+            try:
+                # Decode base64 image
+                nparr = np.frombuffer(base64.b64decode(image_data), np.uint8)
+                img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                
+                if img is None:
+                    frame_queue.task_done()
+                    continue
+                
+                # Process frame
+                start_time = time.time()
+                
+                # Use async lock to prevent multiple frames being processed simultaneously
+                async with processing_lock:
+                    _, face_results = recognizer.process_frame(img)
+                
+                process_time = time.time() - start_time
+                
+                # Clean results for JSON serialization
+                clean_results = []
+                for face in face_results:
+                    # Convert numpy arrays to lists
+                    bbox = face.get("bbox", []).tolist() if hasattr(face.get("bbox", []), "tolist") else face.get("bbox", [])
+                    
+                    # Create result without face_image first
+                    face_result = {k: v for k, v in face.items() if k != 'face_image'}
+                    face_result["bbox"] = bbox
+                    
+                    # Now add face image as base64 if available
+                    if "face_image" in face and face["face_image"] is not None:
+                        try:
+                            # Resize to smaller dimensions to reduce data size
+                            face_img = face["face_image"]
+                            if face_img.shape[0] > 96 or face_img.shape[1] > 96:
+                                face_img = cv2.resize(face_img, (96, 96))
+                                
+                            # Encode with reduced quality
+                            encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 70]
+                            _, buffer = cv2.imencode('.jpg', face_img, encode_param)
+                            face_result["image"] = f"data:image/jpeg;base64,{base64.b64encode(buffer).decode('utf-8')}"
+                        except Exception as e:
+                            logger.error(f"Error encoding face image for WebSocket: {e}")
+                            face_result["image"] = None
+                    
+                    clean_results.append(face_result)
+                
+                # Send results back to client - check again if websocket is still active
+                if websocket in active_websockets:
+                    try:
+                        await websocket.send_json({
+                            "type": "recognition_result",
+                            "faces": clean_results,
+                            "performance": {
+                                "process_time": process_time,
+                                "fps": recognizer.fps
+                            }
+                        })
+                    except Exception as e:
+                        logger.error(f"Failed to send result: {e}")
+                        # If we can't send, the WebSocket is likely closed - remove it
+                        if websocket in active_websockets:
+                            active_websockets.remove(websocket)
+                
+            except Exception as e:
+                logger.error(f"Error processing WebSocket frame: {e}")
+            finally:
+                # Always mark the task as done, regardless of success or failure
+                frame_queue.task_done()
+            
+    except asyncio.CancelledError:
+        # Task was cancelled
+        logger.info("Frame processing task cancelled")
+    except Exception as e:
+        logger.error(f"Fatal error in frame processing task: {e}")
+    finally:
+        is_processing_active = False
+
+@app.get("/api/dataset/users")
+async def get_dataset_users():
+    """Get all users in the dataset with their front-facing images."""
+    dataset_dir = Path("dataset/images")
+    users = []
+    
+    if dataset_dir.exists():
+        for person_dir in dataset_dir.iterdir():
+            if person_dir.is_dir():
+                name = person_dir.name
+                front_image_path = person_dir / "no_mask" / "front.jpg"
+                
+                if front_image_path.exists():
+                    users.append({
+                        "id": name,  # Using name as ID for simplicity
+                        "name": name.capitalize(),  # Capitalize name for display
+                        "image_path": f"/dataset/images/{name}/no_mask/front.jpg"
+                    })
+    
+    return users
+
+@app.delete("/api/dataset/users/{user_id}")
+async def delete_dataset_user(user_id: str):
+    """Delete a user from the dataset."""
+    dataset_dir = Path("dataset/images")
+    user_path = dataset_dir / user_id
+    
+    if not user_path.exists():
+        raise HTTPException(status_code=404, detail=f"User '{user_id}' not found in dataset")
+    
+    try:
+        # Delete the user's directory recursively
+        shutil.rmtree(user_path)
+        
+        # Reset recognizer caches if active
+        if recognizer:
+            recognizer.reset_caches()
+            
+        return {"success": True, "message": f"User '{user_id}' deleted from dataset"}
+    except Exception as e:
+        logger.error(f"Error deleting user from dataset: {e}")
+        raise HTTPException(status_code=500, detail=f"Error deleting user: {str(e)}")
+
+from add_person import setup_person_routes
+setup_person_routes(app)
+
+@app.post("/api/regenerate_embeddings")
+async def regenerate_embeddings(background_tasks: BackgroundTasks):
+    """Regenerate embeddings with data augmentation."""
+    try:
+        # Execute the create_embeddings.py script with augmentation flag in the background
+        def create_embeddings_task():
+            import subprocess
+            import sys
+            
+            try:
+                subprocess.run([
+                    sys.executable, 
+                    "create_embeddings.py", 
+                    "--augment"
+                ], check=True)
+                
+                # Reset recognizer caches after embeddings are generated
+                if recognizer:
+                    recognizer.reset_caches()
+                    
+                logger.info("Embeddings regenerated successfully with augmentation")
+            except Exception as e:
+                logger.error(f"Error regenerating embeddings: {e}")
+                
+        # Run the task in the background
+        background_tasks.add_task(create_embeddings_task)
+        
+        return {"success": True, "message": "Regenerating embeddings in background"}
+    except Exception as e:
+        logger.error(f"Error starting embeddings regeneration: {e}")
+        raise HTTPException(status_code=500, detail=f"Error starting embeddings regeneration: {str(e)}")
+
+class EmailSettings(BaseModel):
+    email: str
+    enable_notifications: bool
+
+# Thêm endpoint để cập nhật email
+@app.post("/api/settings/email")
+async def update_email_settings(settings: EmailSettings):
+    """Update email settings for notifications."""
+    try:
+        # Đảm bảo thư mục tồn tại
+        os.makedirs(os.path.dirname(EMAILCONFIG_DIR), exist_ok=True)
+        
+        # Tải cấu hình hiện tại
+        config = load_email_config()
+        
+        # Cập nhật cấu hình mới
+        config["receiver"] = settings.email
+        config["enable_notifications"] = settings.enable_notifications
+        
+        # Lưu cấu hình
+        with open(EMAILCONFIG_DIR, 'w') as f:
+            json.dump(config, f, indent=4)
+            
+        # Cập nhật notification service nếu đã khởi tạo
+        if recognizer and recognizer.notification_service:
+            recognizer.notification_service.update_email_config(config)
+            
+        return {"success": True, "message": "Email settings updated"}
+    except Exception as e:
+        logger.error(f"Error updating email settings: {e}")
+        return {"success": False, "message": str(e)}
+
+# Thêm endpoint để lấy cấu hình email hiện tại
+@app.get("/api/settings/email")
+async def get_email_settings():
+    """Get current email settings."""
+    global email_config
+    
+    try:
+        use_notifications = False
+        email = ""
+        
+        if email_config:
+            email = email_config.get("receiver", "")
+            # Lấy trạng thái notification từ recognizer
+            if recognizer:
+                use_notifications = recognizer.use_notification
+        
+        return {
+            "email": email,
+            "enable_notifications": use_notifications
+        }
+    except Exception as e:
+        logger.error(f"Error getting email settings: {e}")
+        raise HTTPException(status_code=500, detail=f"Error getting email settings: {str(e)}")
+
+# Run the app
 if __name__ == "__main__":
-    main()
+    import uvicorn
+    import os
+    
+    host = os.environ.get("HOST", "0.0.0.0")
+    port = int(os.environ.get("PORT", 7860))
+    
+    uvicorn.run(app, host=host, port=port)

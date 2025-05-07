@@ -1,19 +1,17 @@
+"""Face embedding creation and management for recognition system."""
 import os
 import cv2
 import numpy as np
 import pickle
 import hnswlib
-import sys
 import time
 import logging
-import argparse
-from typing import Dict, Optional, Any, Tuple, List, Set
+from typing import Dict, Optional, Tuple, List, Any, Set
 from pathlib import Path
 from tqdm import tqdm
 
-from config import DATASET_DIR, MODEL_DIR, EMBEDDINGS_PATH, EMBEDDINGS_SOURCE_INFO_PATH
-from models.face_recognition.arcface import ArcFace
-# Thay đổi import để sử dụng hàm resize chuyên dụng
+from config import DATASET_IMAGES_DIR, MODEL_DIR, EMBEDDINGS_PATH, EMBEDDINGS_SOURCE_INFO_PATH
+from static.models.face_recognition.arcface import ArcFace
 from preprocessing import resize_for_face_recognition
 
 # Configure logging
@@ -22,64 +20,89 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[logging.FileHandler('embedding_errors.log'), logging.StreamHandler()]
 )
+logger = logging.getLogger(__name__)
 
-# Đường dẫn mô hình ArcFace
-ARCFACE_MODEL_PATH = os.path.join(MODEL_DIR, "r100_arcface_glint.onnx")
+# Constants
+ARCFACE_MODEL_PATH = os.path.join(MODEL_DIR, "face_recognition", "r100_arcface_glint.onnx")
+
 
 class EmbeddingCreator:
-    """Creates, manages and stores face embeddings for recognition."""
+    """Creates and manages face embeddings for recognition."""
     
     def __init__(self, model_path: Optional[str] = None, use_augmentation: bool = False):
+        """Initialize with model path and augmentation settings."""
         self.model_path = model_path or ARCFACE_MODEL_PATH
-        self.model = self._create_model()
+        self.use_augmentation = use_augmentation
+        
+        # Core components
+        self.model = self._load_model()
         self.embeddings_db = {}
+        self.embedding_source_info = {}
         self.error_records = {
             "failed_images": [], 
             "failed_people": set(),
             "null_embeddings": 0, 
             "error_count": 0
         }
-        self.embedding_source_info = {}
-        self.mask_status_mapping = {
-            "no_mask": "no_mask",
-            "with_mask": "with_mask"
-        }
         
-        # HNSW index configuration
-        self.embedding_dimension = 512  # ArcFace thường có 512 chiều
+        # HNSW configuration
+        self.embedding_dimension = 512
         self.hnsw_index = None
         self.index_id_to_info = []
-        self.ef_construction = 200  # Higher = more accurate but slower construction
-        self.M = 16                 # Number of connections per element
-        self.ef_search = 50         # Higher = more accurate but slower search
-        
-        # Quality settings
-        self.normalize_embeddings = True
+        self.ef_construction = 200
+        self.M = 16
+        self.ef_search = 50
         
         # Augmentation settings
-        self.use_augmentation = use_augmentation
         self.augmentation_types = ["flip", "rotate", "brightness"]
         self.rotation_angles = [-5, 5]
         self.brightness_factors = [0.9, 1.1]
         
         os.makedirs(os.path.dirname(EMBEDDINGS_PATH), exist_ok=True)
-        
-        status = "with" if self.use_augmentation else "without"
-        print(f"Initialized EmbeddingCreator {status} augmentation")
+        logger.info(f"Initialized EmbeddingCreator {'with' if use_augmentation else 'without'} augmentation")
     
-    def _create_model(self) -> ArcFace:
-        """Create and load ArcFace model."""
-        print(f"Loading ArcFace model from {self.model_path}...")
+    def _load_model(self) -> ArcFace:
+        """Load ArcFace model."""
+        logger.info(f"Loading ArcFace model from {self.model_path}")
         try:
-            model = ArcFace(model_path=self.model_path)
-            print("ArcFace model loaded successfully")
-            return model
+            return ArcFace(model_path=self.model_path)
         except Exception as e:
-            print(f"CRITICAL ERROR creating ArcFace model: {e}")
-            sys.exit(1)
+            logger.error(f"Failed to load ArcFace model: {e}")
+            raise
 
-    def _create_augmented_images(self, face_img):
-        """Create augmented versions of an input face image."""
+    def extract_embedding(self, face_img: np.ndarray, landmarks=None) -> Optional[np.ndarray]:
+        """Extract embedding from a face image."""
+        try:
+            if not self.use_augmentation:
+                return self._extract_single_embedding(face_img, landmarks)
+            return self._extract_augmented_embeddings(face_img, landmarks)
+        except Exception as e:
+            logger.error(f"Error extracting embedding: {e}")
+            self.error_records["error_count"] += 1
+            return None
+            
+    def _extract_single_embedding(self, face_img: np.ndarray, landmarks=None) -> Optional[np.ndarray]:
+        """Extract embedding from a single image."""
+        try:
+            if landmarks is None:
+                face_img = resize_for_face_recognition(face_img)
+                if face_img is None:
+                    return None
+                embedding = self.model.get_feat(face_img)[0]
+            else:
+                embedding = self.model(face_img, landmarks)
+                
+            if embedding is None or np.isnan(embedding).any() or np.sum(embedding) == 0:
+                self.error_records["null_embeddings"] += 1
+                return None
+
+            return embedding
+        except Exception as e:
+            logger.error(f"Error in single embedding extraction: {e}")
+            return None
+    
+    def _create_augmented_images(self, face_img: np.ndarray) -> List[Tuple[str, np.ndarray]]:
+        """Create augmented versions of an image."""
         augmented_images = [("original", face_img)]
         
         if not self.use_augmentation:
@@ -89,19 +112,18 @@ class EmbeddingCreator:
             h, w = face_img.shape[:2]
             center = (w // 2, h // 2)
             
-            # Horizontal flip
+            # Add horizontal flip
             if "flip" in self.augmentation_types:
-                flipped = cv2.flip(face_img, 1)
-                augmented_images.append(("flip", flipped))
+                augmented_images.append(("flip", cv2.flip(face_img, 1)))
             
-            # Rotation augmentations
+            # Add rotations
             if "rotate" in self.augmentation_types:
                 for angle in self.rotation_angles:
                     M = cv2.getRotationMatrix2D(center, angle, 1.0)
                     rotated = cv2.warpAffine(face_img, M, (w, h), borderMode=cv2.BORDER_REPLICATE)
                     augmented_images.append((f"rotate_{angle}", rotated))
             
-            # Brightness variations
+            # Add brightness variations
             if "brightness" in self.augmentation_types:
                 for factor in self.brightness_factors:
                     brightened = cv2.convertScaleAbs(face_img, alpha=factor, beta=0)
@@ -109,63 +131,21 @@ class EmbeddingCreator:
             
             return augmented_images
         except Exception as e:
-            logging.error(f"Error during image augmentation: {e}")
+            logger.error(f"Error during image augmentation: {e}")
             return [("original", face_img)]
-
-    def extract_embedding(self, face_img, landmarks=None):
-        """Extract face embedding from an image."""
-        try:
-            if not self.use_augmentation:
-                return self._extract_single_embedding(face_img, landmarks)
-            else:
-                return self._extract_augmented_embeddings(face_img, landmarks)
-        except Exception as e:
-            logging.error(f"Error extracting embedding: {e}")
-            self.error_records["error_count"] += 1
-            return None
             
-    def _extract_single_embedding(self, face_img, landmarks=None):
-        """Extract embedding from a single face image."""
-        try:
-            # ArcFace cần face và landmarks
-            if landmarks is None:
-                # Nếu không có landmarks, xử lý ảnh trực tiếp
-                # Thay đổi: Sử dụng hàm resize_for_face_recognition từ preprocessing
-                face_img = resize_for_face_recognition(face_img)
-                if face_img is None:
-                    return None
-                embedding = self.model.get_feat(face_img)[0]
-            else:
-                # Sử dụng landmarks để căn chỉnh khuôn mặt
-                embedding = self.model(face_img, landmarks)
-                
-            if embedding is None or np.isnan(embedding).any() or np.sum(embedding) == 0:
-                self.error_records["null_embeddings"] += 1
-                return None
-
-            return embedding
-        except Exception as e:
-            logging.error(f"Error in _extract_single_embedding: {e}")
-            return None
-            
-    def _extract_augmented_embeddings(self, face_img, landmarks=None):
-        """Extract and combine embeddings from augmented versions of a face image."""
-        augmented_images = self._create_augmented_images(face_img)
-        if not augmented_images:
-            return None
-        
+    def _extract_augmented_embeddings(self, face_img: np.ndarray, landmarks=None) -> Optional[np.ndarray]:
+        """Extract embeddings from augmented images and combine them."""
         valid_embeddings = []
         
-        for aug_name, aug_img in augmented_images:
+        for aug_name, aug_img in self._create_augmented_images(face_img):
             try:
                 if landmarks is None:
-                    # Thay đổi: Sử dụng hàm resize_for_face_recognition từ preprocessing
                     aug_img = resize_for_face_recognition(aug_img)
                     if aug_img is None:
                         continue
                     curr_embedding = self.model.get_feat(aug_img)[0]
                 else:
-                    # Sử dụng landmarks để căn chỉnh
                     curr_embedding = self.model(aug_img, landmarks)
                     
                 if curr_embedding is None or np.isnan(curr_embedding).any() or np.sum(curr_embedding) == 0:
@@ -173,45 +153,46 @@ class EmbeddingCreator:
                     
                 valid_embeddings.append(curr_embedding)
             except Exception as e:
-                logging.error(f"Error processing augmented image {aug_name}: {e}")
+                logger.error(f"Error processing augmented image {aug_name}: {e}")
                 continue
         
         if not valid_embeddings:
             return None
             
-        # Average the embeddings with weighting
+        # Use single embedding directly if only one is valid
         if len(valid_embeddings) == 1:
-            final_embedding = valid_embeddings[0]
-        else:
-            # Original image gets double weight
-            weights = np.ones(len(valid_embeddings))
-            if augmented_images[0][0] == "original":
-                weights[0] = 2.0
+            return valid_embeddings[0]
+            
+        # Original image gets double weight
+        weights = np.ones(len(valid_embeddings))
+        if len(valid_embeddings) > 1:  # Only adjust weights if we have multiple embeddings
+            weights[0] = 2.0
             weights = weights / np.sum(weights)
             
-            final_embedding = np.zeros_like(valid_embeddings[0])
-            for i, emb in enumerate(valid_embeddings):
-                final_embedding += emb * weights[i]
-                
-            # Normalize the final averaged embedding
-            norm = np.linalg.norm(final_embedding)
-            if norm > 1e-10:
-                final_embedding = final_embedding / norm
-        
+        # Calculate weighted average
+        final_embedding = np.zeros_like(valid_embeddings[0])
+        for i, emb in enumerate(valid_embeddings):
+            final_embedding += emb * weights[i]
+            
+        # Normalize
+        norm = np.linalg.norm(final_embedding)
+        if norm > 1e-10:
+            final_embedding = final_embedding / norm
+    
         return final_embedding
 
-    def _initialize_hnsw(self):
-        """Initialize HNSW index for efficient similarity search."""
+    def _initialize_hnsw(self, max_elements: int = 10000) -> None:
+        """Initialize HNSW index for similarity search."""
         self.hnsw_index = hnswlib.Index(space='cosine', dim=self.embedding_dimension)
         self.hnsw_index.init_index(
-            max_elements=10000,
+            max_elements=max_elements,
             ef_construction=self.ef_construction,
             M=self.M
         )
         self.hnsw_index.set_ef(self.ef_search)
         self.index_id_to_info = []
 
-    def _add_to_hnsw(self, person_name, mask_status, pose_name, embedding):
+    def _add_to_hnsw(self, person_name: str, mask_status: str, pose_name: str, embedding: np.ndarray) -> None:
         """Add an embedding to the HNSW index."""
         if self.hnsw_index is None:
             self._initialize_hnsw()
@@ -220,111 +201,120 @@ class EmbeddingCreator:
         self.index_id_to_info.append((person_name, mask_status, pose_name))
         self.hnsw_index.add_items(embedding, index_id)
 
-    def process_dataset(self):
+    def process_dataset(self) -> bool:
         """Process all faces in the dataset and create embeddings."""
         start_time = time.time()
-        success = True
+        
+        # Validate dataset directory
+        if not os.path.exists(DATASET_IMAGES_DIR):
+            logger.error(f"Dataset directory {DATASET_IMAGES_DIR} does not exist")
+            return False
 
-        if not os.path.exists(DATASET_DIR):
-            logging.error(f"Dataset directory {DATASET_DIR} does not exist")
-            print(f"ERROR: Dataset directory {DATASET_DIR} does not exist")
-            sys.exit(1)
-
-        person_dirs = [d for d in os.listdir(DATASET_DIR) 
-                      if os.path.isdir(os.path.join(DATASET_DIR, d))]
+        person_dirs = [d for d in os.listdir(DATASET_IMAGES_DIR) 
+                      if os.path.isdir(os.path.join(DATASET_IMAGES_DIR, d))]
+        
         if not person_dirs:
-            logging.warning("No persons found in the dataset")
-            print("ERROR: No persons found in the dataset directory")
-            sys.exit(1)
+            logger.warning("No persons found in the dataset")
+            return False
 
-        print(f"Found {len(person_dirs)} persons in the dataset")
+        logger.info(f"Found {len(person_dirs)} persons in the dataset")
         
         # Initialize data structures
         self.embeddings_db = {}
         self._initialize_hnsw()
         self.embedding_source_info = {}
+        success = True
         
-        print("Creating embeddings for all persons")
-
+        # Process each person
         for person_name in tqdm(person_dirs, desc="Processing persons"):
-            person_dir = os.path.join(DATASET_DIR, person_name)
-            self.embeddings_db[person_name] = {"no_mask": {}, "with_mask": {}}
-            self.embedding_source_info[person_name] = {"no_mask": {}, "with_mask": {}}
-            person_success = True
-
-            # Process no_mask directory (required)
-            no_mask_dir = os.path.join(person_dir, "no_mask")
-            if os.path.exists(no_mask_dir):
-                mask_success = self._process_directory(no_mask_dir, person_name, "no_mask")
-                if not mask_success:
-                    person_success = False
-                    logging.error(f"Failed to process no_mask images for {person_name}")
-            else:
-                logging.error(f"No 'no_mask' directory found for {person_name}")
-                person_success = False
-
-            # Process with_mask directory (optional)
-            with_mask_dir = os.path.join(person_dir, "with_mask")
-            if os.path.exists(with_mask_dir):
-                self._process_directory(with_mask_dir, person_name, "with_mask")
-
-            # Validate person data
-            if not person_success or len(self.embeddings_db[person_name]["no_mask"]) == 0:
-                logging.error(f"Removing {person_name} due to insufficient valid data")
-                if person_name in self.embeddings_db:
-                    del self.embeddings_db[person_name]
-                self.error_records["failed_people"].add(person_name)
+            if not self._process_person(person_name):
                 success = False
                 
-            # Create combined embeddings for each mask status
-            if person_name in self.embeddings_db:
-                self._create_combined_embeddings(person_name)
-
+        # Check if we have valid embeddings
         if len(self.embeddings_db) == 0:
-            logging.error("No valid embeddings were created")
-            print("ERROR: No valid embeddings were created")
-            sys.exit(1)
+            logger.error("No valid embeddings were created")
+            return False
 
+        # Save results if successful
         if success and self.error_records["null_embeddings"] == 0:
             self.save_embeddings()
             elapsed = time.time() - start_time
-            print(f"Embedding creation completed in {elapsed:.2f} seconds")
-            print(f"Created embeddings for {len(self.embeddings_db)} people")
+            logger.info(f"Embedding creation completed in {elapsed:.2f} seconds")
+            logger.info(f"Created embeddings for {len(self.embeddings_db)} people")
             return True
         else:
-            logging.error(f"Embeddings NOT saved due to errors: "
+            logger.error(f"Embeddings NOT saved due to errors: "
                         f"{len(self.error_records['failed_images'])} failed images, "
                         f"{len(self.error_records['failed_people'])} failed people, "
                         f"{self.error_records['null_embeddings']} null embeddings")
-            print("ERROR: Failed to create valid embeddings")
-            sys.exit(1)
+            return False
 
-    def _create_combined_embeddings(self, person_name):
+    def _process_person(self, person_name: str) -> bool:
+        """Process a person's directory to create embeddings."""
+        person_dir = os.path.join(DATASET_IMAGES_DIR, person_name)
+        self.embeddings_db[person_name] = {"no_mask": {}, "with_mask": {}}
+        self.embedding_source_info[person_name] = {"no_mask": {}, "with_mask": {}}
+        person_success = True
+
+        # Process no_mask directory (required)
+        no_mask_dir = os.path.join(person_dir, "no_mask")
+        if os.path.exists(no_mask_dir):
+            if not self._process_directory(no_mask_dir, person_name, "no_mask"):
+                person_success = False
+                logger.error(f"Failed to process no_mask images for {person_name}")
+        else:
+            logger.error(f"No 'no_mask' directory found for {person_name}")
+            person_success = False
+
+        # Process with_mask directory (optional)
+        with_mask_dir = os.path.join(person_dir, "with_mask")
+        if os.path.exists(with_mask_dir):
+            self._process_directory(with_mask_dir, person_name, "with_mask")
+
+        # Remove person if insufficient data
+        if not person_success or not self.embeddings_db[person_name]["no_mask"]:
+            logger.error(f"Removing {person_name} due to insufficient valid data")
+            if person_name in self.embeddings_db:
+                del self.embeddings_db[person_name]
+            self.error_records["failed_people"].add(person_name)
+            return False
+        
+        # Create combined embeddings
+        self._create_combined_embeddings(person_name)
+        return True
+
+    def _create_combined_embeddings(self, person_name: str) -> None:
         """Create combined embeddings by averaging all embeddings for each mask status."""
         for mask_status in ["no_mask", "with_mask"]:
             poses = self.embeddings_db[person_name][mask_status]
-            if poses:
-                embeddings = list(poses.values())
-                if embeddings:
-                    # Calculate average embedding
-                    combined = np.mean(embeddings, axis=0)
-                    # Normalize
-                    norm = np.linalg.norm(combined)
-                    if norm > 1e-10:
-                        combined = combined / norm
-                        # Add combined embedding
-                        pose_name = "combined"
-                        self.embeddings_db[person_name][mask_status][pose_name] = combined
-                        self.embedding_source_info[person_name][mask_status][pose_name] = "combined"
-                        self._add_to_hnsw(person_name, mask_status, pose_name, combined)
+            if not poses:
+                continue
+                
+            # Calculate average embedding
+            embeddings = list(poses.values())
+            combined = np.mean(embeddings, axis=0)
+            
+            # Normalize
+            norm = np.linalg.norm(combined)
+            if norm > 1e-10:
+                combined = combined / norm
+                
+                # Add combined embedding
+                pose_name = "combined"
+                self.embeddings_db[person_name][mask_status][pose_name] = combined
+                self.embedding_source_info[person_name][mask_status][pose_name] = "combined"
+                self._add_to_hnsw(person_name, mask_status, pose_name, combined)
 
-    def _process_directory(self, directory, person_name, status):
-        """Process all images in a directory."""
-        mask_status = self.mask_status_mapping.get(status, status)
+    def _process_directory(self, directory: str, person_name: str, status: str) -> bool:
+        """Process images in a directory."""
+        mask_status = status  # Our mapping is already 1:1
         image_files = [f for f in os.listdir(directory) 
                       if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
 
-        success = len(image_files) > 0
+        if not image_files:
+            logger.warning(f"No images found in {directory}")
+            return False
+            
         processed_count = 0
 
         for img_file in tqdm(image_files, desc=f"Processing {status} for {person_name}", leave=False):
@@ -335,7 +325,6 @@ class EmbeddingCreator:
                     self.error_records["failed_images"].append(img_path)
                     continue
 
-                # Giả định ảnh đã được căn chỉnh trong quá trình thu thập
                 embedding = self.extract_embedding(img)
 
                 if embedding is not None:
@@ -347,17 +336,18 @@ class EmbeddingCreator:
                 else:
                     self.error_records["failed_images"].append(img_path)
             except Exception as e:
-                logging.error(f"Error processing {img_file}: {e}")
+                logger.error(f"Error processing {img_file}: {e}")
                 self.error_records["failed_images"].append(os.path.join(directory, img_file))
 
-        if processed_count < len(image_files) / 2 and len(image_files) > 0:
-            logging.error(f"Insufficient valid images for {person_name}/{status}: "
+        # Check if we processed sufficient images
+        if processed_count < len(image_files) / 2:
+            logger.error(f"Insufficient valid images for {person_name}/{status}: "
                         f"only {processed_count}/{len(image_files)} successful")
-            success = False
+            return False
 
-        return success
+        return True
 
-    def save_embeddings(self):
+    def save_embeddings(self) -> bool:
         """Save embeddings and HNSW index to disk."""
         try:
             # Save main embeddings data
@@ -380,288 +370,290 @@ class EmbeddingCreator:
             with open(EMBEDDINGS_SOURCE_INFO_PATH, 'wb') as f:
                 pickle.dump(self.embedding_source_info, f)
 
-            print(f"Embeddings saved to {EMBEDDINGS_PATH}")
-            print(f"HNSW index saved to {hnsw_path} (using cosine similarity)")
-            aug_status = "with" if self.use_augmentation else "without"
-            print(f"Embeddings created {aug_status} augmentation")
+            logger.info(f"Embeddings saved to {EMBEDDINGS_PATH}")
+            logger.info(f"HNSW index saved to {hnsw_path} (using cosine similarity)")
+            logger.info(f"Embeddings created {'with' if self.use_augmentation else 'without'} augmentation")
             return True
         except Exception as e:
-            logging.error(f"Error saving embeddings: {e}")
-            print(f"ERROR: Failed to save embeddings: {e}")
-            sys.exit(1)
+            logger.error(f"Error saving embeddings: {e}")
+            return False
 
-    def load_embeddings(self):
+    def load_embeddings(self) -> bool:
         """Load embeddings and HNSW index from disk."""
         try:
-            if os.path.exists(EMBEDDINGS_PATH):
-                with open(EMBEDDINGS_PATH, 'rb') as f:
-                    data = pickle.load(f)
+            if not os.path.exists(EMBEDDINGS_PATH):
+                logger.warning(f"Embeddings file not found: {EMBEDDINGS_PATH}")
+                return False
                 
-                if isinstance(data, dict) and "embeddings_db" in data:
-                    self.embeddings_db = data["embeddings_db"]
-                    self.index_id_to_info = data.get("index_id_to_info", [])
-                    
-                    distance_metric = data.get("distance_metric", "L2")
-                    if distance_metric != "cosine":
-                        print(f"Warning: Loading embeddings with {distance_metric} distance metric, converting to cosine")
-                        
-                    # Check if embeddings were created with augmentation
-                    was_augmented = data.get("with_augmentation", False)
-                    if was_augmented != self.use_augmentation:
-                        print(f"Note: Loaded embeddings were created with{'out' if not was_augmented else ''} augmentation")
-                        print(f"Current setting: {self.use_augmentation}")
-                else:
-                    self.embeddings_db = data
-                    print("Warning: Loading embeddings in old format, converting to cosine similarity")
-                
-                # Load HNSW index
-                hnsw_path = f"{os.path.splitext(EMBEDDINGS_PATH)[0]}_hnsw.bin"
-                if os.path.exists(hnsw_path):
-                    try:
-                        self._initialize_hnsw()  # Create empty index first
-                        self.hnsw_index.load_index(hnsw_path, max_elements=len(self.index_id_to_info))
-                        print(f"HNSW index loaded with {self.hnsw_index.get_current_count()} vectors")
-                        
-                        # Verify correct space type
-                        if not self.is_cosine_index(self.hnsw_index):
-                            print("HNSW index found but is not cosine type, rebuilding...")
-                            self._rebuild_hnsw_index()
-                    except Exception as e:
-                        print(f"Error loading HNSW index: {e}, rebuilding...")
-                        self._rebuild_hnsw_index()
-                else:
-                    print("No HNSW index found, rebuilding with cosine similarity")
-                    self._rebuild_hnsw_index()
+            with open(EMBEDDINGS_PATH, 'rb') as f:
+                data = pickle.load(f)
+            
+            # Process loaded data
+            if isinstance(data, dict) and "embeddings_db" in data:
+                self.embeddings_db = data["embeddings_db"]
+                self.index_id_to_info = data.get("index_id_to_info", [])
+            else:
+                # Handle old format
+                self.embeddings_db = data
+                logger.warning("Loading embeddings in old format")
+            
+            # Load HNSW index
+            self._load_hnsw_index()
 
-                # Load embedding source info
-                if os.path.exists(EMBEDDINGS_SOURCE_INFO_PATH):
-                    try:
-                        with open(EMBEDDINGS_SOURCE_INFO_PATH, 'rb') as f:
-                            self.embedding_source_info = pickle.load(f)
-                    except Exception:
-                        pass
+            # Load embedding source info
+            self._load_embedding_source_info()
 
-                print(f"Embeddings loaded from {EMBEDDINGS_PATH}")
-                return True
-            return False
+            logger.info(f"Embeddings loaded from {EMBEDDINGS_PATH}")
+            return True
         except Exception as e:
-            logging.error(f"Error loading embeddings: {e}")
-            print(f"ERROR: Failed to load embeddings: {e}")
+            logger.error(f"Error loading embeddings: {e}")
             return False
 
-    def is_cosine_index(self, index):
+    def _load_hnsw_index(self) -> None:
+        """Load HNSW index from disk or rebuild if necessary."""
+        hnsw_path = f"{os.path.splitext(EMBEDDINGS_PATH)[0]}_hnsw.bin"
+        if os.path.exists(hnsw_path):
+            try:
+                self._initialize_hnsw()  # Create empty index first
+                self.hnsw_index.load_index(hnsw_path, max_elements=len(self.index_id_to_info))
+                logger.info(f"HNSW index loaded with {self.hnsw_index.get_current_count()} vectors")
+                
+                # Verify correct space type
+                if not self._is_cosine_index():
+                    logger.warning("HNSW index found but is not cosine type, rebuilding...")
+                    self._rebuild_hnsw_index()
+            except Exception as e:
+                logger.error(f"Error loading HNSW index: {e}, rebuilding...")
+                self._rebuild_hnsw_index()
+        else:
+            logger.warning("No HNSW index found, rebuilding with cosine similarity")
+            self._rebuild_hnsw_index()
+
+    def _load_embedding_source_info(self) -> None:
+        """Load embedding source information."""
+        if os.path.exists(EMBEDDINGS_SOURCE_INFO_PATH):
+            try:
+                with open(EMBEDDINGS_SOURCE_INFO_PATH, 'rb') as f:
+                    self.embedding_source_info = pickle.load(f)
+            except Exception as e:
+                logger.warning(f"Could not load embedding source info: {e}")
+                self.embedding_source_info = {}
+
+    def _is_cosine_index(self) -> bool:
         """Check if HNSW index uses cosine similarity."""
         try:
-            return index.space == 'cosine'
+            return self.hnsw_index.space == 'cosine'
         except:
             return False
 
-    def _rebuild_hnsw_index(self):
+    def _rebuild_hnsw_index(self) -> None:
         """Rebuild HNSW index from embeddings_db."""
-        self._initialize_hnsw()
+        count = sum(len(poses) for person_data in self.embeddings_db.values() 
+                  for poses in person_data.values())
+        max_elements = max(10000, count)
+        
+        self._initialize_hnsw(max_elements=max_elements)
         self.index_id_to_info = []
         index_id = 0
-        
-        max_elements = 0
-        for person_name, data in self.embeddings_db.items():
-            for mask_status, poses in data.items():
-                max_elements += len(poses)
-        
-        # Resize index if needed
-        if max_elements > self.hnsw_index.get_max_elements():
-            self.hnsw_index.resize_index(max_elements)
         
         for person_name, data in self.embeddings_db.items():
             for mask_status, poses in data.items():
                 for pose_name, embedding in poses.items():
-                    if embedding is not None:
-                        # Check if embedding is already normalized
-                        norm = np.linalg.norm(embedding)
-                        if not (0.99 <= norm <= 1.01):
-                            # Only normalize if not already normalized
-                            if norm > 1e-10:
-                                embedding = embedding / norm
-                            else:
-                                continue
+                    if embedding is None:
+                        continue
                         
-                        self.index_id_to_info.append((person_name, mask_status, pose_name))
-                        self.hnsw_index.add_items(embedding, index_id)
-                        index_id += 1
+                    # Normalize embedding if needed
+                    norm = np.linalg.norm(embedding)
+                    if not (0.99 <= norm <= 1.01) and norm > 1e-10:
+                        embedding = embedding / norm
+                    
+                    self.index_id_to_info.append((person_name, mask_status, pose_name))
+                    self.hnsw_index.add_items(embedding, index_id)
+                    index_id += 1
         
-        print(f"Rebuilt HNSW index with {self.hnsw_index.get_current_count()} vectors")
+        logger.info(f"Rebuilt HNSW index with {self.hnsw_index.get_current_count()} vectors")
 
-    def analyze_embedding_distribution(self):
+    def analyze_embedding_distribution(self) -> Dict:
         """Analyze distribution of similarities between embeddings."""
+        if not self.hnsw_index or self.hnsw_index.get_current_count() == 0:
+            logger.warning("No embeddings available for analysis")
+            return {}
+            
+        # Collect similarity data
+        similarities = self._collect_similarity_data()
+        if not similarities or not similarities.get("same_person"):
+            logger.warning("Insufficient data for analysis")
+            return {}
+            
+        return self._calculate_statistics(similarities)
+        
+    def _collect_similarity_data(self) -> Dict:
+        """Collect similarity data between embeddings."""
         same_person_similarities = []
         diff_person_similarities = []
         same_person_mask_to_nomask = []
         same_person_same_status = []
 
-        if self.hnsw_index and self.hnsw_index.get_current_count() > 0:
-            for person, data in tqdm(self.embeddings_db.items(), desc="Analyzing embedding distributions"):
-                person_embeddings = []
-                
-                for status, poses in data.items():
-                    for pose, embedding in poses.items():
-                        if embedding is not None:
-                            # Check if embedding is normalized
-                            norm = np.linalg.norm(embedding)
-                            if not (0.99 <= norm <= 1.01):
-                                # Normalize if needed
-                                if norm > 1e-10:
-                                    embedding = embedding / norm
-                                else:
-                                    continue
-                            
-                            person_embeddings.append((embedding, status, pose))
-                
-                # Compare each embedding with all others
-                for _, (emb1, status1, pose1) in enumerate(person_embeddings):
-                    # For cosine similarity, we need to search k nearest neighbors
-                    k = min(50, self.hnsw_index.get_current_count())
-                    labels, distances = self.hnsw_index.knn_query(emb1, k=k)
-                    
-                    # Convert cosine distances to similarities (1 - distance)
-                    similarities = 1 - np.array(distances)[0]
-                    
-                    for similarity, idx in zip(similarities, labels[0]):
-                        if idx >= len(self.index_id_to_info):
-                            continue
-                            
-                        other_person, other_status, other_pose = self.index_id_to_info[idx]
+        for person, data in tqdm(self.embeddings_db.items(), desc="Analyzing embeddings"):
+            person_embeddings = []
+            for status, poses in data.items():
+                for pose, embedding in poses.items():
+                    if embedding is None:
+                        continue
                         
-                        if other_person == person and other_status == status1 and other_pose == pose1:
-                            continue  # Skip comparing with itself
-                            
-                        if other_person == person:
-                            same_person_similarities.append(float(similarity))
-                            
-                            # Additional analysis for same person
-                            if status1 != other_status:
-                                same_person_mask_to_nomask.append(float(similarity))
-                            else:
-                                same_person_same_status.append(float(similarity))
-                        else:
-                            diff_person_similarities.append(float(similarity))
-        
-        # Basic analysis
-        if same_person_similarities and diff_person_similarities:
-            same_mean = np.mean(same_person_similarities)
-            diff_mean = np.mean(diff_person_similarities)
-
-            print("\nEmbedding Similarity Analysis (using HNSW with cosine similarity):")
-            print(f"Same person mean similarity: {same_mean:.4f} (higher is better)")
-            print(f"Different person mean similarity: {diff_mean:.4f}")
-            print(f"Separation margin: {same_mean - diff_mean:.4f} (higher is better)")
-
-            # Additional detailed analysis
-            if same_person_mask_to_nomask and same_person_same_status:
-                mask_to_nomask_mean = np.mean(same_person_mask_to_nomask)
-                same_status_mean = np.mean(same_person_same_status)
+                    # Ensure embedding is normalized
+                    norm = np.linalg.norm(embedding)
+                    if not (0.99 <= norm <= 1.01) and norm > 1e-10:
+                        embedding = embedding / norm
+                    
+                    person_embeddings.append((embedding, status, pose))
+            
+            # Compare with nearest neighbors
+            for emb1, status1, pose1 in person_embeddings:
+                k = min(50, self.hnsw_index.get_current_count())
+                labels, distances = self.hnsw_index.knn_query(emb1, k=k)
                 
-                print("\nDetailed Similarity Analysis:")
-                print(f"Same person, same mask status: {same_status_mean:.4f}")
-                print(f"Same person, different mask status: {mask_to_nomask_mean:.4f}")
-                print(f"Mask impact on similarity: {(same_status_mean - mask_to_nomask_mean):.4f} lower")
+                # Convert distances to similarities
+                similarities = 1 - np.array(distances)[0]
+                
+                for similarity, idx in zip(similarities, labels[0]):
+                    if idx >= len(self.index_id_to_info):
+                        continue
+                        
+                    other_person, other_status, other_pose = self.index_id_to_info[idx]
+                    
+                    # Skip self-comparison
+                    if other_person == person and other_status == status1 and other_pose == pose1:
+                        continue
+                        
+                    if other_person == person:
+                        same_person_similarities.append(float(similarity))
+                        
+                        if status1 != other_status:
+                            same_person_mask_to_nomask.append(float(similarity))
+                        else:
+                            same_person_same_status.append(float(similarity))
+                    else:
+                        diff_person_similarities.append(float(similarity))
+        
+        return {
+            "same_person": same_person_similarities,
+            "diff_person": diff_person_similarities,
+            "mask_to_nomask": same_person_mask_to_nomask,
+            "same_status": same_person_same_status
+        }
+        
+    def _calculate_statistics(self, similarity_data: Dict) -> Dict:
+        """Calculate statistics from similarity data."""
+        same_person = similarity_data["same_person"]
+        diff_person = similarity_data["diff_person"]
+        mask_to_nomask = similarity_data["mask_to_nomask"]
+        same_status = similarity_data["same_status"]
+        
+        same_mean = np.mean(same_person)
+        diff_mean = np.mean(diff_person)
+        separation = same_mean - diff_mean
 
-            # Calculate threshold
-            same_arr = np.array(same_person_similarities)
-            diff_arr = np.array(diff_person_similarities)
+        # Calculate optimal threshold
+        best_threshold, min_error = self._calculate_optimal_threshold(same_person, diff_person)
+        
+        # Calculate mask impact if data available
+        mask_impact = None
+        if mask_to_nomask and same_status:
+            mask_to_nomask_mean = np.mean(mask_to_nomask)
+            same_status_mean = np.mean(same_status)
+            mask_impact = same_status_mean - mask_to_nomask_mean
 
-            min_error = float('inf')
-            best_threshold = 0.5
+        # Log the results
+        logger.info(f"\nSame person similarity: {same_mean:.4f} | Different person: {diff_mean:.4f}")
+        logger.info(f"Separation margin: {separation:.4f} | Recommended threshold: {best_threshold:.2f}")
+        if mask_impact is not None:
+            logger.info(f"Mask impact: {mask_impact:.4f} lower similarity")
 
-            for threshold in np.arange(0.1, 1.0, 0.01):
-                false_reject = np.sum(same_arr < threshold) / len(same_arr) if len(same_arr) > 0 else 0
-                false_accept = np.sum(diff_arr >= threshold) / len(diff_arr) if len(diff_arr) > 0 else 0
-                error_rate = false_reject + false_accept
+        return {
+            "same_person_mean": same_mean,
+            "diff_person_mean": diff_mean,
+            "separation": separation,
+            "recommended_threshold": best_threshold,
+            "error_rate": min_error,
+            "mask_impact": mask_impact
+        }
+        
+    def _calculate_optimal_threshold(self, same_arr: List[float], diff_arr: List[float]) -> Tuple[float, float]:
+        """Calculate optimal threshold for classification."""
+        same_arr = np.array(same_arr)
+        diff_arr = np.array(diff_arr)
+        
+        min_error = float('inf')
+        best_threshold = 0.5
 
-                if error_rate < min_error:
-                    min_error = error_rate
-                    best_threshold = threshold
+        # Search for best threshold
+        for threshold in np.arange(0.1, 1.0, 0.01):
+            false_reject = np.sum(same_arr < threshold) / len(same_arr) if len(same_arr) > 0 else 0
+            false_accept = np.sum(diff_arr >= threshold) / len(diff_arr) if len(diff_arr) > 0 else 0
+            error_rate = false_reject + false_accept
 
-            print(f"Recommended cosine similarity threshold: {best_threshold:.2f}")
-            print(f"Error rate at this threshold: {min_error:.4f}")
-            print(f"Note: With cosine similarity, HIGHER values mean more similarity")
-            print(f"Augmentation: {'Enabled' if self.use_augmentation else 'Disabled'}")
-            print(f"Model: r100_arcface_glint.onnx")
-
-            return {
-                "same_person_mean": same_mean,
-                "diff_person_mean": diff_mean,
-                "separation": same_mean - diff_mean,
-                "recommended_threshold": best_threshold,
-                "error_rate": min_error,
-                "mask_impact": (same_status_mean - mask_to_nomask_mean) 
-                               if same_person_mask_to_nomask and same_person_same_status else None
-            }
-        return None
+            if error_rate < min_error:
+                min_error = error_rate
+                best_threshold = threshold
+                
+        return best_threshold, min_error
 
 
-def print_statistics(embeddings_db, embedding_source_info=None):
+def print_statistics(embeddings_db: Dict) -> None:
     """Print statistics about the embeddings database."""
     total_people = len(embeddings_db)
     
-    # Count regular and combined embeddings separately
-    total_no_mask_regular = 0
-    total_with_mask_regular = 0
-    total_no_mask_combined = 0
-    total_with_mask_combined = 0
-    
-    for person_data in embeddings_db.values():
-        for pose_name in person_data["no_mask"]:
-            if pose_name == "combined":
-                total_no_mask_combined += 1
-            else:
-                total_no_mask_regular += 1
-                
-        for pose_name in person_data["with_mask"]:
-            if pose_name == "combined":
-                total_with_mask_combined += 1
-            else:
-                total_with_mask_regular += 1
+    no_mask_regular = sum(len(data["no_mask"]) - (1 if "combined" in data["no_mask"] else 0) 
+                          for data in embeddings_db.values())
+    with_mask_regular = sum(len(data["with_mask"]) - (1 if "combined" in data["with_mask"] else 0) 
+                           for data in embeddings_db.values())
+    no_mask_combined = sum(1 if "combined" in data["no_mask"] else 0 for data in embeddings_db.values())
+    with_mask_combined = sum(1 if "combined" in data["with_mask"] else 0 for data in embeddings_db.values())
 
-    print(f"\nGenerated embeddings for {total_people} people:")
-    print(f"- Total no_mask: {total_no_mask_regular} regular embeddings, {total_no_mask_combined} combined")
-    print(f"- Total with_mask: {total_with_mask_regular} regular embeddings, {total_with_mask_combined} combined")
-
-    print("\nEmbeddings by person:")
-    for person, data in embeddings_db.items():
-        no_mask = sum(1 for p in data["no_mask"] if p != "combined")
-        with_mask = sum(1 for p in data["with_mask"] if p != "combined")
-        no_mask_combined = 1 if "combined" in data["no_mask"] else 0
-        with_mask_combined = 1 if "combined" in data["with_mask"] else 0
-        
-        combined_info = f" (+{no_mask_combined + with_mask_combined} combined)" if no_mask_combined + with_mask_combined > 0 else ""
-        print(f"- {person}: {no_mask+with_mask} embeddings ({no_mask} no_mask, {with_mask} with_mask){combined_info}")
+    logger.info(f"\nGenerated embeddings for {total_people} people:")
+    logger.info(f"- No mask: {no_mask_regular} regular, {no_mask_combined} combined")
+    logger.info(f"- With mask: {with_mask_regular} regular, {with_mask_combined} combined")
 
 
-if __name__ == "__main__":
+def main() -> int:
+    """Main function to run the embedding creation."""
+    import argparse
     parser = argparse.ArgumentParser(description='Create or update face embeddings')
     parser.add_argument('--validate', action='store_true', help='Validate database only')
     parser.add_argument('--analyze', action='store_true', help='Analyze embedding distributions')
-    parser.add_argument('--augment', action='store_true', help='Use data augmentation for robust embeddings')
+    parser.add_argument('--augment', action='store_true', help='Use data augmentation for embeddings')
     args = parser.parse_args()
 
-    print(f"Creating face embeddings from {DATASET_DIR} using ArcFace model: r100_arcface_glint.onnx")
+    logger.info(f"Creating face embeddings from {DATASET_IMAGES_DIR}")
     creator = EmbeddingCreator(use_augmentation=args.augment)
 
-    print("Using pre-aligned images from add_person.py (160x160)")
-    if args.augment:
-        print("Data augmentation ENABLED: Will create additional embeddings from augmented images")
-
-    if args.validate:
-        creator.load_embeddings()
-        print_statistics(creator.embeddings_db)
-        print("All embeddings validated successfully!")
-    elif args.analyze:
-        creator.load_embeddings()
-        creator.analyze_embedding_distribution()
-    else:
-        success = creator.process_dataset()
-        if success:
-            print_statistics(creator.embeddings_db)
-            creator.analyze_embedding_distribution()
+    try:
+        if args.validate:
+            if creator.load_embeddings():
+                print_statistics(creator.embeddings_db)
+                logger.info("All embeddings validated successfully!")
+                return 0
+            logger.error("Failed to load embeddings for validation")
+            return 1
+        elif args.analyze:
+            if creator.load_embeddings():
+                creator.analyze_embedding_distribution()
+                return 0
+            logger.error("Failed to load embeddings for analysis")
+            return 1
         else:
-            print("Failed to create embeddings database. No data was saved.")
-            sys.exit(1)
+            if creator.process_dataset():
+                print_statistics(creator.embeddings_db)
+                creator.analyze_embedding_distribution()
+                return 0
+            logger.error("Failed to create embeddings database")
+            return 1
+    except Exception as e:
+        logger.error(f"Unexpected error: {e}")
+        return 1
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(main())
