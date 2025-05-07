@@ -1,110 +1,119 @@
-// ===== WebSocket Connection =====
-let socket = null;
-let isRecognizing = false;
-let lastFrameSent = 0;
-let frameInterval = 100; // Max 10 fps to server
-let totalFrames = 0;
-let framesLastSecond = 0;
-let lastFpsUpdate = Date.now();
-let currentFPS = 0;
-let stats = {
-  latency: 0,
-  recognition_time: 0,
-  detection_time: 0,
-  spoof_detection_time: 0,
+/**
+ * Face Recognition System Frontend
+ * Provides real-time face detection, recognition, and security notifications
+ */
+
+// ===== Core State =====
+const state = {
+  socket: null,
+  isRecognizing: false,
+  lastFrameSent: 0,
+  frameInterval: 100, // Limit to 10 fps to server
+  totalFrames: 0,
+  framesLastSecond: 0,
+  currentFPS: 0,
+  activeStream: null,
+  availableCameras: [],
+  detectedFaces: [],
+  datasetUsers: [],
+  faceIdentityMap: new Map(), // Maps track_id to recognized identity
+  stats: {
+    latency: 0,
+    recognition_time: 0,
+    detection_time: 0,
+    spoof_detection_time: 0,
+  },
 };
 
-// New variables for camera control
-let activeStream = null;
-let availableCameras = [];
+// ===== DOM Elements =====
+const elements = {
+  // Video and display elements
+  video: document.getElementById("video"),
+  canvas: document.getElementById("canvas"),
+  faceBoxesContainer: document.getElementById("face-boxes-container"),
+  cameraOverlay: document.getElementById("camera-overlay"),
+  recordingIndicator: document.getElementById("recording-indicator"),
 
-// DOM Elements
-const video = document.getElementById("video");
-const canvas = document.getElementById("canvas");
-const ctx = canvas.getContext("2d");
-const faceBoxesContainer = document.getElementById("face-boxes-container");
-const detectedFacesList = document.getElementById("detected-faces-list");
-const datasetUsersList = document.getElementById("dataset-users-list");
-const startBtn = document.getElementById("start-btn");
-const stopBtn = document.getElementById("stop-btn");
-const addPersonBtn = document.getElementById("add-person-btn");
-const updateDatasetBtn = document.getElementById("update-dataset-btn");
-const cleanTempBtn = document.getElementById("clean-temp-btn");
-const testNotificationBtn = document.getElementById("test-notification-btn");
-const cameraOverlay = document.getElementById("camera-overlay");
-const enableCameraBtn = document.getElementById("enable-camera-btn");
-const recordingIndicator = document.getElementById("recording-indicator");
-const fpsCounter = document.getElementById("fps-counter");
-const detectedCount = document.getElementById("detected-count");
-const datasetCount = document.getElementById("dataset-count");
-const connectionStatus = document.getElementById("connection-status");
-const connectionStatusText = document.getElementById("connectionStatus");
-const statsBtn = document.getElementById("statsBtn");
-const statsPopup = document.getElementById("stats-popup");
-const latencyStat = document.getElementById("latency-stat");
-const recogTimeStat = document.getElementById("recog-time-stat");
-const spoofTimeStat = document.getElementById("spoof-time-stat");
-const detectTimeStat = document.getElementById("detect-time-stat");
-const showTechStackBtn = document.getElementById("showTechStackBtn");
-const closeTechStackBtn = document.getElementById("closeTechStackBtn");
-const techStackPopup = document.getElementById("techStackPopup");
-const cameraSelect = document.getElementById("camera-select"); // New camera select element
+  // Lists and counters
+  detectedFacesList: document.getElementById("detected-faces-list"),
+  datasetUsersList: document.getElementById("dataset-users-list"),
+  fpsCounter: document.getElementById("fps-counter"),
+  detectedCount: document.getElementById("detected-count"),
+  datasetCount: document.getElementById("dataset-count"),
 
-// Feature indicators
-const featureFaceDetection = document.getElementById("feature-face-detection");
-const featureRecognition = document.getElementById("feature-recognition");
-const featureAntiSpoofing = document.getElementById("feature-anti-spoofing");
-const featureMaskDetection = document.getElementById("feature-mask-detection");
-const featureTracking = document.getElementById("feature-tracking");
+  // Control buttons
+  startBtn: document.getElementById("start-btn"),
+  stopBtn: document.getElementById("stop-btn"),
+  addPersonBtn: document.getElementById("add-person-btn"),
+  updateDatasetBtn: document.getElementById("update-dataset-btn"),
+  cleanTempBtn: document.getElementById("clean-temp-btn"),
+  testNotificationBtn: document.getElementById("test-notification-btn"),
+  enableCameraBtn: document.getElementById("enable-camera-btn"),
+  cameraSelect: document.getElementById("camera-select"),
 
-// Notification Settings
-const notificationSettings = document.getElementById("notification-settings");
-const closeNotificationSettings = document.getElementById(
-  "close-notification-settings"
-);
-const notificationEmail = document.getElementById("notification-email");
-const emailError = document.getElementById("email-error");
-const enableNotifications = document.getElementById("enable-notifications");
-const saveNotificationSettings = document.getElementById(
-  "save-notification-settings"
-);
+  // Status and popups
+  connectionStatus: document.getElementById("connection-status"),
+  connectionStatusText: document.getElementById("connectionStatus"),
+  statsBtn: document.getElementById("statsBtn"),
+  statsPopup: document.getElementById("stats-popup"),
+  showTechStackBtn: document.getElementById("showTechStackBtn"),
+  closeTechStackBtn: document.getElementById("closeTechStackBtn"),
+  techStackPopup: document.getElementById("techStackPopup"),
 
-// App State
-let detectedFaces = [];
-let datasetUsers = [];
-let faceIdentityMap = new Map(); // Map để theo dõi danh tính khuôn mặt theo track_id
+  // Stats display
+  latencyStat: document.getElementById("latency-stat"),
+  recogTimeStat: document.getElementById("recog-time-stat"),
+  spoofTimeStat: document.getElementById("spoof-time-stat"),
+  detectTimeStat: document.getElementById("detect-time-stat"),
 
-// Initialize the app
+  // Feature indicators
+  featureFaceDetection: document.getElementById("feature-face-detection"),
+  featureRecognition: document.getElementById("feature-recognition"),
+  featureAntiSpoofing: document.getElementById("feature-anti-spoofing"),
+  featureMaskDetection: document.getElementById("feature-mask-detection"),
+  featureTracking: document.getElementById("feature-tracking"),
+
+  // Notification settings
+  notificationSettings: document.getElementById("notification-settings"),
+  closeNotificationSettings: document.getElementById(
+    "close-notification-settings"
+  ),
+  notificationEmail: document.getElementById("notification-email"),
+  emailError: document.getElementById("email-error"),
+  enableNotifications: document.getElementById("enable-notifications"),
+  saveNotificationSettings: document.getElementById(
+    "save-notification-settings"
+  ),
+};
+
+const ctx = elements.canvas.getContext("2d");
+
+// ===== Initialization =====
+/**
+ * Initialize the application
+ */
 function init() {
-  // Enumerate available webcams
   enumerateWebcams();
+  checkForDatasetUpdates();
 
-  // Don't immediately access camera, wait for user to click Start
-  cameraOverlay.classList.remove("hidden");
+  if (!localStorage.getItem("datasetUpdated")) {
+    loadData();
+  }
 
-  // Load initial data
-  loadData();
-
-  // Load notification settings
   loadNotificationSettings();
-
-  // Set up event listeners
   setupEventListeners();
 
-  // Calculate FPS periodically
+  // Calculate FPS every second
   setInterval(calculateFPS, 1000);
 
-  // Show notification settings by default
-  notificationSettings.classList.remove("hidden");
-
-  // Hide recording indicator initially
-  recordingIndicator.classList.add("hidden");
-
-  // Yêu cầu quyền thông báo khi khởi động
+  elements.notificationSettings.classList.remove("hidden");
+  elements.recordingIndicator.classList.add("hidden");
   requestNotificationPermission();
 }
 
-// Yêu cầu quyền thông báo trình duyệt
+/**
+ * Request browser notification permission
+ */
 function requestNotificationPermission() {
   if (
     Notification.permission !== "granted" &&
@@ -114,21 +123,10 @@ function requestNotificationPermission() {
   }
 }
 
-// Load notification settings from server
-function loadNotificationSettings() {
-  fetch("/api/settings/email")
-    .then((response) => response.json())
-    .then((data) => {
-      // Update UI with current settings
-      notificationEmail.value = data.email || "";
-      enableNotifications.checked = data.enable_notifications;
-    })
-    .catch((error) => {
-      console.error("Error loading notification settings:", error);
-    });
-}
-
-// Enumerate available webcams
+// ===== Camera Management =====
+/**
+ * Get list of available webcams and populate dropdown
+ */
 function enumerateWebcams() {
   navigator.mediaDevices
     .enumerateDevices()
@@ -136,10 +134,10 @@ function enumerateWebcams() {
       const videoDevices = devices.filter(
         (device) => device.kind === "videoinput"
       );
-      availableCameras = videoDevices;
+      state.availableCameras = videoDevices;
 
-      // Populate the dropdown
-      cameraSelect.innerHTML = videoDevices.length
+      // Update camera selection dropdown
+      elements.cameraSelect.innerHTML = videoDevices.length
         ? videoDevices
             .map(
               (device, idx) =>
@@ -151,39 +149,18 @@ function enumerateWebcams() {
         : '<option value="">No cameras found</option>';
     })
     .catch((err) => {
-      console.error("Error enumerating devices: ", err);
-      cameraSelect.innerHTML =
+      console.error("Error enumerating devices:", err);
+      elements.cameraSelect.innerHTML =
         '<option value="">Error loading cameras</option>';
     });
 }
 
-// Check camera access - modified to not auto-start
-function checkCameraAccess() {
-  navigator.permissions
-    .query({ name: "camera" })
-    .then((permissionStatus) => {
-      if (permissionStatus.state === "granted") {
-        // Just show camera overlay, don't auto-start
-        cameraOverlay.classList.remove("hidden");
-      } else {
-        cameraOverlay.classList.remove("hidden");
-      }
-
-      permissionStatus.onchange = () => {
-        if (permissionStatus.state === "granted") {
-          cameraOverlay.classList.remove("hidden");
-        }
-      };
-    })
-    .catch(() => {
-      // Fallback for browsers that don't support permissions API
-      cameraOverlay.classList.remove("hidden");
-    });
-}
-
-// Start camera stream - updated for device selection
+/**
+ * Start camera with selected device
+ * @returns {Promise} Stream promise
+ */
 function startCamera() {
-  const selectedDeviceId = cameraSelect.value;
+  const selectedDeviceId = elements.cameraSelect.value;
 
   const constraints = {
     video: selectedDeviceId
@@ -197,75 +174,63 @@ function startCamera() {
   return navigator.mediaDevices
     .getUserMedia(constraints)
     .then((stream) => {
-      activeStream = stream;
-      video.srcObject = stream;
-      cameraOverlay.classList.add("hidden");
+      state.activeStream = stream;
+      elements.video.srcObject = stream;
+      elements.cameraOverlay.classList.add("hidden");
 
-      // Update camera selection with labels if they were empty before
-      if (!availableCameras.some((cam) => cam.label)) {
-        setTimeout(enumerateWebcams, 500); // Re-enumerate after permission granted
+      // Re-enumerate cameras if needed to get labels
+      if (!state.availableCameras.some((cam) => cam.label)) {
+        setTimeout(enumerateWebcams, 500);
       }
 
       // Set canvas dimensions to match video
-      video.onloadedmetadata = () => {
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
+      elements.video.onloadedmetadata = () => {
+        elements.canvas.width = elements.video.videoWidth;
+        elements.canvas.height = elements.video.videoHeight;
       };
 
       return stream;
     })
     .catch((err) => {
-      console.error("Camera error: ", err);
-      cameraOverlay.classList.remove("hidden");
+      console.error("Camera error:", err);
+      elements.cameraOverlay.classList.remove("hidden");
       showNotification("Failed to access camera", "error");
       throw err;
     });
 }
 
-// Stop camera stream - new function
+/**
+ * Stop active camera stream
+ */
 function stopCamera() {
-  if (activeStream) {
-    activeStream.getTracks().forEach((track) => {
-      track.stop();
-    });
-    activeStream = null;
-    video.srcObject = null;
+  if (state.activeStream) {
+    state.activeStream.getTracks().forEach((track) => track.stop());
+    state.activeStream = null;
+    elements.video.srcObject = null;
   }
 }
 
-// New function to start both camera and recognition
+/**
+ * Start camera and recognition
+ */
 function startAll() {
-  if (isRecognizing) return;
+  if (state.isRecognizing) return;
 
-  // Start camera with current selection
   startCamera()
-    .then(() => {
-      startRecognition();
-    })
-    .catch((err) => {
-      console.error("Failed to start camera:", err);
-      // Error handling is in startCamera
-    });
+    .then(() => startRecognition())
+    .catch((err) => console.error("Failed to start camera:", err));
 }
 
-// New function to stop both camera and recognition
+/**
+ * Stop recognition but keep camera active with pause overlay
+ */
 function stopAll() {
   stopRecognition();
 
-  // Không tắt camera
-  // stopCamera();
-
-  // Không hiển thị overlay yêu cầu quyền camera
-  // cameraOverlay.classList.remove("hidden");
-
-  // Thay vào đó, hiển thị overlay thông báo trạng thái tạm dừng
-  const faceBoxesContainer = document.getElementById("face-boxes-container");
-  faceBoxesContainer.innerHTML = "";
-
-  // Hiển thị thông báo nhỏ tạm dừng
+  elements.faceBoxesContainer.innerHTML = "";
   showNotification("Face recognition paused", "info");
 
-  // Hiển thị overlay với thông báo tạm dừng thay vì "Camera Access Required"
+  // Create pause overlay
   const pauseOverlay = document.createElement("div");
   pauseOverlay.className =
     "absolute inset-0 flex items-center justify-center bg-slate-900/50";
@@ -280,484 +245,164 @@ function stopAll() {
   const cameraContainer = document.querySelector(".camera-container");
   cameraContainer.appendChild(pauseOverlay);
 
-  // Lưu để có thể xóa sau này
+  // Store reference to remove later
   window.pauseOverlay = pauseOverlay;
 }
 
-// Function to switch camera
+/**
+ * Switch to different camera
+ */
 function switchCamera() {
-  // Only restart if already active
-  if (isRecognizing) {
+  if (state.isRecognizing) {
     stopRecognition();
     startCamera()
-      .then(() => {
-        startRecognition();
-      })
-      .catch((err) => {
-        console.error("Failed to switch camera:", err);
-      });
-  } else if (activeStream) {
-    startCamera().catch((err) => {
-      console.error("Failed to switch camera:", err);
-    });
+      .then(() => startRecognition())
+      .catch((err) => console.error("Failed to switch camera:", err));
+  } else if (state.activeStream) {
+    startCamera().catch((err) =>
+      console.error("Failed to switch camera:", err)
+    );
   }
 }
 
-// Update feature indicators based on system status
-function updateFeatureStatus(features) {
-  updateFeatureElement(featureFaceDetection, true); // Always enabled
-  updateFeatureElement(featureRecognition, features.face_recognition);
-  updateFeatureElement(featureAntiSpoofing, features.anti_spoofing);
-  updateFeatureElement(featureMaskDetection, features.mask_detection);
-  updateFeatureElement(featureTracking, features.face_tracking);
-}
-
-function updateFeatureElement(element, enabled) {
-  if (enabled) {
-    element.classList.add("enabled");
-    element.classList.remove("disabled");
-    element.querySelector("i").className = "fas fa-square-check";
-  } else {
-    element.classList.add("disabled");
-    element.classList.remove("enabled");
-    element.querySelector("i").className = "fas fa-square-xmark";
-  }
-}
-
-// Set up event listeners - updated for new functions
-function setupEventListeners() {
-  // Camera controls - updated for new functions
-  enableCameraBtn.addEventListener("click", startAll);
-  startBtn.addEventListener("click", startAll);
-  stopBtn.addEventListener("click", stopAll);
-  cameraSelect.addEventListener("change", switchCamera);
-
-  // Control panel buttons
-  addPersonBtn.addEventListener("click", () => {
-    window.location.href = "/add_person";
-  });
-  updateDatasetBtn.addEventListener("click", updateDataset);
-  cleanTempBtn.addEventListener("click", cleanTempFiles);
-  testNotificationBtn.addEventListener("click", testNotification);
-
-  // Stats button
-  statsBtn.addEventListener("click", () => {
-    statsPopup.classList.toggle("hidden");
-  });
-
-  // Tech stack popup
-  showTechStackBtn.addEventListener("click", () => {
-    techStackPopup.classList.toggle("hidden");
-  });
-  closeTechStackBtn.addEventListener("click", () => {
-    techStackPopup.classList.add("hidden");
-  });
-
-  // Notification settings
-  closeNotificationSettings.addEventListener("click", () =>
-    notificationSettings.classList.add("hidden")
-  );
-  saveNotificationSettings.addEventListener(
-    "click",
-    saveNotificationSettingsHandler
-  );
-
-  // Dataset users list - improved click handler
-  datasetUsersList.addEventListener("click", (event) => {
-    // Check if delete button was clicked
-    const deleteBtn = event.target.closest("button");
-    if (deleteBtn) {
-      const userId = deleteBtn.dataset.userId;
-      if (userId) {
-        deleteUser(userId);
-      }
-    }
-  });
-}
-
-// Load initial data (for datasets)
-function loadData() {
-  // Get real dataset users
-  fetch("/api/dataset/users")
-    .then((response) => response.json())
-    .then((data) => {
-      datasetUsers = data;
-      datasetCount.textContent = datasetUsers.length;
-      updateDatasetUsersList();
-    })
-    .catch((error) => {
-      console.error("Failed to load dataset users:", error);
-      // Fallback to empty array if API fails
-      datasetUsers = [];
-      datasetCount.textContent = "0";
-      updateDatasetUsersList();
-    });
-
-  // Get system status from API
-  fetch("/api/status")
-    .then((response) => response.json())
-    .then((data) => {
-      updateFeatureStatus(data.features);
-    })
-    .catch((error) => {
-      console.error("Failed to load system status:", error);
-    });
-}
-
-// WebSocket Connection
+// ===== WebSocket Communication =====
+/**
+ * Setup WebSocket connection to server
+ */
 function setupWebSocketConnection() {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   const wsUrl = `${protocol}//${window.location.host}/ws`;
 
-  socket = new WebSocket(wsUrl);
+  state.socket = new WebSocket(wsUrl);
 
-  socket.onopen = (event) => {
+  state.socket.onopen = () => {
     updateConnectionStatus("connected");
     showNotification("WebSocket connected", "success");
   };
 
-  socket.onmessage = (event) => {
-    handleWebSocketMessage(event.data);
-  };
+  state.socket.onmessage = (event) => handleWebSocketMessage(event.data);
 
-  socket.onclose = (event) => {
+  state.socket.onclose = () => {
     updateConnectionStatus("disconnected");
 
-    // Attempt to reconnect if actively recognizing
-    if (isRecognizing) {
+    // Auto-reconnect if actively recognizing
+    if (state.isRecognizing) {
       setTimeout(setupWebSocketConnection, 3000);
       showNotification("Connection lost. Reconnecting...", "warning");
     }
   };
 
-  socket.onerror = (error) => {
+  state.socket.onerror = (error) => {
     console.error("WebSocket error:", error);
     updateConnectionStatus("disconnected");
     showNotification("Connection error", "error");
   };
 }
 
-// Update connection status UI
+/**
+ * Update connection status UI
+ * @param {string} status - Connection status: connected, connecting, disconnected
+ */
 function updateConnectionStatus(status) {
-  const statusElement = document.getElementById("connection-status");
+  const statusElement = elements.connectionStatus;
   statusElement.className = "connection-status " + status;
 
-  switch (status) {
-    case "connected":
-      statusElement.textContent = "Connected";
-      connectionStatusText.textContent = "Connected";
-      break;
-    case "connecting":
-      statusElement.textContent = "Connecting...";
-      connectionStatusText.textContent = "Connecting...";
-      break;
-    case "disconnected":
-      statusElement.textContent = "Disconnected";
-      connectionStatusText.textContent = "Disconnected";
-      break;
-  }
+  const statusText = {
+    connected: "Connected",
+    connecting: "Connecting...",
+    disconnected: "Disconnected",
+  }[status];
+
+  statusElement.textContent = statusText;
+  elements.connectionStatusText.textContent = statusText;
 }
 
-// Hàm xử lý thông báo bảo mật với định dạng giống email
-function handleSecurityNotification(data) {
-  // Hiển thị thông báo trong ứng dụng
-  const { type, camera_id, new_count, total_count } = data;
-
-  let message = "";
-  if (type === "new_face") {
-    if (new_count > 1) {
-      message = `Phát hiện ${new_count} người lạ mới tại camera ${camera_id}`;
-    } else {
-      message = `Phát hiện người lạ mới tại camera ${camera_id}`;
-    }
-  } else if (type === "periodic") {
-    message = `Cảnh báo: ${total_count} người lạ đang xuất hiện tại camera ${camera_id}`;
-  }
-
-  // Hiển thị thông báo trong ứng dụng
-  showNotification(message, "warning");
-
-  // Hiển thị thông báo trình duyệt nếu được cho phép
-  if (Notification.permission === "granted") {
-    const notification = createSecurityNotification(data);
-    new Notification(notification.title, notification);
-  } else if (Notification.permission !== "denied") {
-    Notification.requestPermission().then((permission) => {
-      if (permission === "granted") {
-        const notification = createSecurityNotification(data);
-        new Notification(notification.title, notification);
-      }
-    });
-  }
-}
-
-// Tạo nội dung thông báo đồng bộ với email
-function createSecurityNotification(data) {
-  const { type, camera_id, new_count, total_count, timestamp } = data;
-
-  // Định dạng thời gian
-  const time = new Date(timestamp || Date.now()).toLocaleString("vi-VN");
-
-  // Tạo nội dung thông báo dựa trên loại
-  if (type === "new_face") {
-    const title = "CẢNH BÁO AN NINH";
-    let body;
-
-    if (new_count > 1) {
-      body = `Hệ thống đã phát hiện ${new_count} người lạ mới tại camera ${camera_id}.\n`;
-    } else {
-      body = `Hệ thống đã phát hiện người lạ mới tại camera ${camera_id}.\n`;
-    }
-
-    body += `Tổng cộng có ${total_count} người lạ đang xuất hiện.\n`;
-    body += `Thời gian: ${time}\n`;
-    body += `Vui lòng kiểm tra!`;
-
-    return {
-      title: title,
-      body: body,
-      icon:
-        "/static/images/alert-icon.png" ||
-        "https://cdn-icons-png.flaticon.com/512/1680/1680012.png",
-    };
-  } else if (type === "periodic") {
-    return {
-      title: "CẬP NHẬT AN NINH",
-      body:
-        `Hiện có ${total_count} người lạ đang xuất hiện tại camera ${camera_id}.\n` +
-        `Thời gian: ${time}\n` +
-        `Đây là thông báo định kỳ.`,
-      icon:
-        "/static/images/info-icon.png" ||
-        "https://cdn-icons-png.flaticon.com/512/1680/1680012.png",
-    };
-  }
-
-  // Mặc định nếu không có loại phù hợp
-  return {
-    title: "THÔNG BÁO HỆ THỐNG",
-    body: "Có cảnh báo mới từ hệ thống an ninh",
-    icon: "https://cdn-icons-png.flaticon.com/512/1680/1680012.png",
-  };
-}
-
-// Handle messages from WebSocket
+/**
+ * Process incoming WebSocket messages
+ * @param {string} data - Raw message data
+ */
 function handleWebSocketMessage(data) {
   try {
     const message = JSON.parse(data);
 
-    if (message.type === "recognition_result") {
-      // Process recognition results
-      handleRecognitionResults(message.faces, message.performance);
-    } else if (message.type === "security_notification") {
-      // Xử lý thông báo bảo mật từ backend
-      handleSecurityNotification(message.notification);
-    } else if (message.type === "error") {
-      showNotification("Server error: " + message.message, "error");
-    } else if (message.type === "command_result") {
-      handleCommandResult(message);
+    switch (message.type) {
+      case "recognition_result":
+        handleRecognitionResults(message.faces, message.performance);
+        break;
+      case "security_notification":
+        handleSecurityNotification(message.notification);
+        break;
+      case "error":
+        showNotification("Server error: " + message.message, "error");
+        break;
+      case "command_result":
+        handleCommandResult(message);
+        break;
     }
   } catch (error) {
     console.error("Error handling websocket message:", error);
   }
 }
 
-// Handle command results
+/**
+ * Process server command results
+ * @param {Object} message - Command result message
+ */
 function handleCommandResult(message) {
-  if (message.command === "cleanup_temp") {
-    if (message.success) {
-      showNotification(
-        `Cleaned up ${message.data.deleted_count} temporary files`,
-        "success"
-      );
-    } else {
-      showNotification("Failed to clean temporary files", "error");
-    }
-  } else if (message.command === "reset_caches") {
-    if (message.success) {
-      showNotification("Recognition caches reset successfully", "success");
-    } else {
-      showNotification("Failed to reset caches", "error");
-    }
-  } else if (message.command === "embeddings_complete") {
-    // Xử lý thông báo hoàn thành việc tạo embeddings
-    if (message.success) {
-      showNotification("Embeddings regenerated successfully", "success");
+  const { command, success, data, message: errorMessage } = message;
 
-      // Reload dataset users to reflect changes
-      loadData();
-    } else {
-      showNotification(
-        `Error generating embeddings: ${message.message || "Unknown error"}`,
-        "error"
-      );
-    }
-
-    // Đảm bảo nút được reset về trạng thái ban đầu
-    updateDatasetBtn.innerHTML =
-      '<i class="fas fa-sync-alt text-xl"></i><span class="text-sm">Update Dataset</span>';
-    updateDatasetBtn.disabled = false;
-  }
-}
-
-// Handle recognition results - cập nhật logic theo dõi danh tính
-function handleRecognitionResults(faces, performance) {
-  if (!isRecognizing) return;
-
-  // Update stats
-  if (performance) {
-    stats.latency = Date.now() - lastFrameSent;
-    if (performance.detection_time)
-      stats.detection_time = performance.detection_time;
-    if (performance.recognition_time)
-      stats.recognition_time = performance.recognition_time;
-    if (performance.spoof_detection_time)
-      stats.spoof_detection_time = performance.spoof_detection_time;
-
-    updateStatsDisplay();
-  }
-
-  // Clear existing face boxes
-  faceBoxesContainer.innerHTML = "";
-
-  // Process detections
-  const updatesNeeded = [];
-
-  if (faces && faces.length > 0) {
-    faces.forEach((face) => {
-      // Create face box for live display
-      createFaceBox(face);
-
-      // Lấy track_id để theo dõi danh tính
-      const trackId = face.track_id !== undefined ? face.track_id : -1;
-
-      if (trackId >= 0) {
-        // Nếu có track_id hợp lệ
-        const faceId = `track_${trackId}`;
-        const currentName = face.name || "Unknown";
-        const previousIdentity = faceIdentityMap.get(faceId);
-
-        // Thêm khuôn mặt mới hoặc cập nhật khi danh tính thay đổi
-        if (!previousIdentity || previousIdentity !== currentName) {
-          faceIdentityMap.set(faceId, currentName);
-
-          // Đánh dấu cần cập nhật danh sách
-          updatesNeeded.push({
-            ...face,
-            faceId: faceId,
-            timestamp: new Date(),
-            identity_changed: previousIdentity ? true : false,
-            previous_identity: previousIdentity,
-          });
-        }
+  switch (command) {
+    case "cleanup_temp":
+      if (success) {
+        showNotification(
+          `Cleaned up ${data.deleted_count} temporary files`,
+          "success"
+        );
       } else {
-        // Khuôn mặt không có track_id vẫn được thêm vào để hiển thị
-        const tempId = `face_${Date.now()}_${Math.random()
-          .toString(36)
-          .substring(7)}`;
-        updatesNeeded.push({
-          ...face,
-          faceId: tempId,
-          timestamp: new Date(),
-        });
+        showNotification("Failed to clean temporary files", "error");
       }
-    });
-  }
+      // Reset button state
+      elements.cleanTempBtn.innerHTML =
+        '<i class="fas fa-trash-alt text-xl"></i><span class="text-sm">Clean Temp</span>';
+      elements.cleanTempBtn.disabled = false;
+      break;
 
-  // Thêm khuôn mặt mới/cập nhật vào danh sách
-  if (updatesNeeded.length > 0) {
-    // Thêm khuôn mặt mới lên đầu danh sách
-    detectedFaces = [...updatesNeeded, ...detectedFaces].slice(0, 20); // Giữ tối đa 20 khuôn mặt
-    updateDetectedFacesList();
+    case "reset_caches":
+      showNotification(
+        success
+          ? "Recognition caches reset successfully"
+          : "Failed to reset caches",
+        success ? "success" : "error"
+      );
+      break;
+
+    case "embeddings_complete":
+      if (success) {
+        showNotification("Embeddings regenerated successfully", "success");
+        loadData(); // Reload dataset to reflect changes
+      } else {
+        showNotification(
+          `Error generating embeddings: ${errorMessage || "Unknown error"}`,
+          "error"
+        );
+      }
+
+      // Reset button state
+      elements.updateDatasetBtn.innerHTML =
+        '<i class="fas fa-sync-alt text-xl"></i><span class="text-sm">Update Dataset</span>';
+      elements.updateDatasetBtn.disabled = false;
+      break;
   }
 }
 
-// Update stats display
-function updateStatsDisplay() {
-  latencyStat.textContent = `${stats.latency}ms`;
-  recogTimeStat.textContent = `${
-    stats.recognition_time ? stats.recognition_time.toFixed(1) + "ms" : "-"
-  }`;
-  spoofTimeStat.textContent = `${
-    stats.spoof_detection_time
-      ? stats.spoof_detection_time.toFixed(1) + "ms"
-      : "-"
-  }`;
-  detectTimeStat.textContent = `${
-    stats.detection_time ? stats.detection_time.toFixed(1) + "ms" : "-"
-  }`;
-}
-
-// Create face box element
-function createFaceBox(face) {
-  const [x1, y1, x2, y2] = face.bbox;
-
-  // Tính toán tỷ lệ giữa kích thước hiển thị và kích thước xử lý
-  const videoElement = document.getElementById("video");
-  const displayWidth = videoElement.clientWidth;
-  const displayHeight = videoElement.clientHeight;
-  const videoWidth = videoElement.videoWidth || canvas.width;
-  const videoHeight = videoElement.videoHeight || canvas.height;
-
-  // Tính toán tọa độ đã điều chỉnh tỷ lệ
-  const scaleX = displayWidth / videoWidth;
-  const scaleY = displayHeight / videoHeight;
-
-  const scaledX1 = x1 * scaleX;
-  const scaledY1 = y1 * scaleY;
-  const scaledWidth = (x2 - x1) * scaleX;
-  const scaledHeight = (y2 - y1) * scaleY;
-
-  // Tạo và định vị face box
-  const faceBox = document.createElement("div");
-  faceBox.className = "face-box";
-  faceBox.style.width = `${scaledWidth}px`;
-  faceBox.style.height = `${scaledHeight}px`;
-  faceBox.style.left = `${scaledX1}px`;
-  faceBox.style.top = `${scaledY1}px`;
-  // Set border color based on face status
-  if (face.is_spoofed) {
-    faceBox.style.borderColor = "#ef4444"; // Red for spoofed faces
-  } else if (face.is_unknown) {
-    faceBox.style.borderColor = "#f97316"; // Orange for unknown faces
-  } else {
-    faceBox.style.borderColor = "#22c55e"; // Green for known faces
-  }
-
-  // Create label
-  const faceLabel = document.createElement("div");
-  faceLabel.className = "face-label";
-
-  // Set label text
-  let labelText = face.name || "Unknown";
-
-  if (face.is_spoofed) {
-    labelText += " [SPOOF]";
-  }
-
-  if (face.wearing_mask) {
-    labelText += " [MASK]";
-  }
-
-  faceLabel.textContent = labelText;
-
-  // Add confidence if available
-  if (face.confidence) {
-    const confidenceSpan = document.createElement("span");
-    confidenceSpan.className = "ml-1 text-xs text-slate-400";
-    confidenceSpan.textContent = `${(face.confidence * 100).toFixed(0)}%`;
-    faceLabel.appendChild(confidenceSpan);
-  }
-
-  faceBox.appendChild(faceLabel);
-  faceBoxesContainer.appendChild(faceBox);
-}
-
-// Start WebRTC recognition - modified to focus on recognition only
+// ===== Face Recognition =====
+/**
+ * Start face recognition process
+ */
 function startRecognition() {
-  if (isRecognizing) return;
+  if (state.isRecognizing) return;
 
-  // Xóa overlay tạm dừng nếu có
+  // Remove pause overlay if exists
   if (window.pauseOverlay) {
     window.pauseOverlay.remove();
     window.pauseOverlay = null;
@@ -767,57 +412,61 @@ function startRecognition() {
   setupWebSocketConnection();
   updateConnectionStatus("connecting");
 
-  isRecognizing = true;
-  startBtn.disabled = true;
-  stopBtn.disabled = false;
-  recordingIndicator.classList.remove("hidden");
+  state.isRecognizing = true;
+  elements.startBtn.disabled = true;
+  elements.stopBtn.disabled = false;
+  elements.recordingIndicator.classList.remove("hidden");
 
   // Start sending frames
   sendVideoFrames();
 }
 
-// Stop recognition - đã cập nhật để reset danh sách đã phát hiện
+/**
+ * Stop face recognition process
+ */
 function stopRecognition() {
-  if (!isRecognizing) return;
+  if (!state.isRecognizing) return;
 
-  isRecognizing = false;
-  startBtn.disabled = false;
-  stopBtn.disabled = true;
-  recordingIndicator.classList.add("hidden");
-
-  // Reset theo dõi khuôn mặt đã phát hiện
-  // detectedFaceIds.clear(); - Không cần thiết nữa vì chúng ta sử dụng faceIdentityMap
+  state.isRecognizing = false;
+  elements.startBtn.disabled = false;
+  elements.stopBtn.disabled = true;
+  elements.recordingIndicator.classList.add("hidden");
 
   // Close WebSocket if open
-  if (socket && socket.readyState === WebSocket.OPEN) {
-    socket.close();
+  if (state.socket && state.socket.readyState === WebSocket.OPEN) {
+    state.socket.close();
   }
 
   // Clear face boxes
-  faceBoxesContainer.innerHTML = "";
+  elements.faceBoxesContainer.innerHTML = "";
 }
 
-// Send video frames via WebSocket
+/**
+ * Capture and send video frames to server via WebSocket
+ */
 function sendVideoFrames() {
-  if (!isRecognizing) return;
+  if (!state.isRecognizing) return;
 
-  totalFrames++;
-  framesLastSecond++;
+  state.totalFrames++;
+  state.framesLastSecond++;
 
   const now = Date.now();
-  if (now - lastFrameSent >= frameInterval) {
-    lastFrameSent = now;
+  if (now - state.lastFrameSent >= state.frameInterval) {
+    state.lastFrameSent = now;
 
     try {
-      if (socket && socket.readyState === WebSocket.OPEN) {
-        // Capture frame
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      if (state.socket && state.socket.readyState === WebSocket.OPEN) {
+        // Capture and send frame
+        ctx.drawImage(
+          elements.video,
+          0,
+          0,
+          elements.canvas.width,
+          elements.canvas.height
+        );
+        const frameDataUrl = elements.canvas.toDataURL("image/jpeg", 0.7);
 
-        // Convert to data URL
-        const frameDataUrl = canvas.toDataURL("image/jpeg", 0.7);
-
-        // Send via WebSocket
-        socket.send(
+        state.socket.send(
           JSON.stringify({
             type: "frame",
             data: frameDataUrl,
@@ -833,131 +482,699 @@ function sendVideoFrames() {
   requestAnimationFrame(sendVideoFrames);
 }
 
-// Calculate and update FPS
-function calculateFPS() {
-  currentFPS = framesLastSecond;
-  fpsCounter.textContent = `${currentFPS} FPS`;
-  framesLastSecond = 0;
+/**
+ * Process recognition results from server
+ * @param {Array} faces - Detected faces data
+ * @param {Object} performance - Performance metrics
+ */
+function handleRecognitionResults(faces, performance) {
+  if (!state.isRecognizing) return;
+
+  // Update performance stats
+  if (performance) {
+    state.stats.latency = Date.now() - state.lastFrameSent;
+    if (performance.detection_time)
+      state.stats.detection_time = performance.detection_time;
+    if (performance.recognition_time)
+      state.stats.recognition_time = performance.recognition_time;
+    if (performance.spoof_detection_time)
+      state.stats.spoof_detection_time = performance.spoof_detection_time;
+
+    updateStatsDisplay();
+  }
+
+  // Clear existing face boxes
+  elements.faceBoxesContainer.innerHTML = "";
+
+  // Process detections
+  const updatesNeeded = [];
+
+  if (faces && faces.length > 0) {
+    faces.forEach((face) => {
+      // Create face box for live display
+      createFaceBox(face);
+
+      // Use track ID to maintain identity persistence
+      const trackId = face.track_id !== undefined ? face.track_id : -1;
+
+      if (trackId >= 0) {
+        const faceId = `track_${trackId}`;
+        const currentName = face.name || "Unknown";
+        const previousIdentity = state.faceIdentityMap.get(faceId);
+
+        // Add new face or update when identity changes
+        if (!previousIdentity || previousIdentity !== currentName) {
+          state.faceIdentityMap.set(faceId, currentName);
+
+          updatesNeeded.push({
+            ...face,
+            faceId: faceId,
+            timestamp: new Date(),
+            identity_changed: previousIdentity ? true : false,
+            previous_identity: previousIdentity,
+          });
+        }
+      } else {
+        // Face without track_id gets temporary ID
+        const tempId = `face_${Date.now()}_${Math.random()
+          .toString(36)
+          .substring(7)}`;
+        updatesNeeded.push({
+          ...face,
+          faceId: tempId,
+          timestamp: new Date(),
+        });
+      }
+    });
+  }
+
+  // Update detected faces list
+  if (updatesNeeded.length > 0) {
+    // Add new faces to top of list, maintain max 20 items
+    state.detectedFaces = [...updatesNeeded, ...state.detectedFaces].slice(
+      0,
+      20
+    );
+    updateDetectedFacesList();
+  }
 }
 
-// Update detected faces list UI - cập nhật để hiển thị thông tin thay đổi danh tính
+/**
+ * Create visual box around detected face
+ * @param {Object} face - Face detection data
+ */
+function createFaceBox(face) {
+  const [x1, y1, x2, y2] = face.bbox;
+
+  // Calculate scale between video and display dimensions
+  const displayWidth = elements.video.clientWidth;
+  const displayHeight = elements.video.clientHeight;
+  const videoWidth = elements.video.videoWidth || elements.canvas.width;
+  const videoHeight = elements.video.videoHeight || elements.canvas.height;
+
+  // Scale coordinates to match display size
+  const scaleX = displayWidth / videoWidth;
+  const scaleY = displayHeight / videoHeight;
+
+  const scaledX1 = x1 * scaleX;
+  const scaledY1 = y1 * scaleY;
+  const scaledWidth = (x2 - x1) * scaleX;
+  const scaledHeight = (y2 - y1) * scaleY;
+
+  // Create face box element
+  const faceBox = document.createElement("div");
+  faceBox.className = "face-box";
+
+  // Position and size the box
+  Object.assign(faceBox.style, {
+    width: `${scaledWidth}px`,
+    height: `${scaledHeight}px`,
+    left: `${scaledX1}px`,
+    top: `${scaledY1}px`,
+    borderColor: face.is_spoofed
+      ? "#ef4444" // Red for spoofed
+      : face.is_unknown
+      ? "#f97316" // Orange for unknown
+      : "#22c55e", // Green for known faces
+  });
+
+  // Create face label
+  const faceLabel = document.createElement("div");
+  faceLabel.className = "face-label";
+
+  // Set label text with status indicators
+  let labelText = face.name || "Unknown";
+  if (face.is_spoofed) labelText += " [SPOOF]";
+  if (face.wearing_mask) labelText += " [MASK]";
+
+  faceLabel.textContent = labelText;
+
+  // Add confidence percentage if available
+  if (face.confidence) {
+    const confidenceSpan = document.createElement("span");
+    confidenceSpan.className = "ml-1 text-xs text-slate-400";
+    confidenceSpan.textContent = `${(face.confidence * 100).toFixed(0)}%`;
+    faceLabel.appendChild(confidenceSpan);
+  }
+
+  faceBox.appendChild(faceLabel);
+  elements.faceBoxesContainer.appendChild(faceBox);
+}
+
+// ===== UI Updates =====
+/**
+ * Calculate and display FPS (frames per second)
+ */
+function calculateFPS() {
+  state.currentFPS = state.framesLastSecond;
+  elements.fpsCounter.textContent = `${state.currentFPS} FPS`;
+  state.framesLastSecond = 0;
+}
+
+/**
+ * Update performance statistics display
+ */
+function updateStatsDisplay() {
+  elements.latencyStat.textContent = `${state.stats.latency}ms`;
+  elements.recogTimeStat.textContent = state.stats.recognition_time
+    ? `${state.stats.recognition_time.toFixed(1)}ms`
+    : "-";
+  elements.spoofTimeStat.textContent = state.stats.spoof_detection_time
+    ? `${state.stats.spoof_detection_time.toFixed(1)}ms`
+    : "-";
+  elements.detectTimeStat.textContent = state.stats.detection_time
+    ? `${state.stats.detection_time.toFixed(1)}ms`
+    : "-";
+}
+
+/**
+ * Update feature indicator status based on system capabilities
+ * @param {Object} features - Enabled features from server
+ */
+function updateFeatureStatus(features) {
+  updateFeatureElement(elements.featureFaceDetection, true); // Always enabled
+  updateFeatureElement(elements.featureRecognition, features.face_recognition);
+  updateFeatureElement(elements.featureAntiSpoofing, features.anti_spoofing);
+  updateFeatureElement(elements.featureMaskDetection, features.mask_detection);
+  updateFeatureElement(elements.featureTracking, features.face_tracking);
+}
+
+/**
+ * Update single feature indicator element
+ * @param {HTMLElement} element - Feature indicator element
+ * @param {boolean} enabled - Whether feature is enabled
+ */
+function updateFeatureElement(element, enabled) {
+  if (enabled) {
+    element.classList.add("enabled");
+    element.classList.remove("disabled");
+    element.querySelector("i").className = "fas fa-square-check";
+  } else {
+    element.classList.add("disabled");
+    element.classList.remove("enabled");
+    element.querySelector("i").className = "fas fa-square-xmark";
+  }
+}
+
+/**
+ * Update UI list of detected faces
+ */
 function updateDetectedFacesList() {
-  if (detectedFaces.length === 0) {
-    detectedFacesList.innerHTML = `
-            <div class="text-center py-8 text-slate-400">
-                <i class="fas fa-user-slash text-3xl mb-2"></i>
-                <p>No faces detected yet</p>
-            </div>
-        `;
-    detectedCount.textContent = "0";
+  if (state.detectedFaces.length === 0) {
+    elements.detectedFacesList.innerHTML = `
+      <div class="text-center py-8 text-slate-400">
+        <i class="fas fa-user-slash text-3xl mb-2"></i>
+        <p>No faces detected yet</p>
+      </div>
+    `;
+    elements.detectedCount.textContent = "0";
     return;
   }
 
-  detectedCount.textContent = detectedFaces.length.toString();
+  elements.detectedCount.textContent = state.detectedFaces.length.toString();
 
-  detectedFacesList.innerHTML = detectedFaces
+  elements.detectedFacesList.innerHTML = state.detectedFaces
     .map((face) => {
-      // Determine status class based on face properties
-      let statusClass = face.is_unknown
+      // Determine status classes based on face properties
+      const isUnknown = face.is_unknown;
+      const isSpoofed = face.is_spoofed;
+
+      const statusClass = isSpoofed
+        ? "bg-red-500/10 border border-red-500/20"
+        : isUnknown
         ? "bg-amber-500/10 border border-amber-500/20"
         : "bg-green-500/10 border border-green-500/20";
-      let statusBadgeClass = face.is_unknown
+
+      const statusBadgeClass = isSpoofed
+        ? "bg-red-500/20 text-red-500"
+        : isUnknown
         ? "bg-amber-500/20 text-amber-500"
         : "bg-green-500/20 text-green-500";
 
-      if (face.is_spoofed) {
-        statusClass = "bg-red-500/10 border border-red-500/20";
-        statusBadgeClass = "bg-red-500/20 text-red-500";
-      }
-
-      // Determine face name and status text
+      // Face info
       const name = face.name || "Unknown";
-      let statusText = face.confidence
+      const statusText = isSpoofed
+        ? "SPOOF"
+        : face.confidence
         ? `${(face.confidence * 100).toFixed(0)}%`
         : "";
 
-      if (face.is_spoofed) {
-        statusText = "SPOOF";
-      }
-
-      // Sử dụng ảnh từ khuôn mặt được capture
       const imgUrl =
         face.image ||
         `https://ui-avatars.com/api/?name=${encodeURIComponent(
           name
         )}&background=random`;
 
-      // Hiển thị ID khuôn mặt nếu có
       const trackInfo = face.track_id >= 0 ? `#${face.track_id}` : "";
 
-      // Thêm thông báo nếu danh tính thay đổi
+      // Identity change badge
       const identityChangedBadge = face.identity_changed
         ? `<div class="text-xs px-2 py-1 rounded-full bg-blue-500/20 text-blue-300 ml-1">ID Changed</div>`
         : "";
 
       return `
-        <div class="flex items-center gap-3 p-3 rounded-lg ${statusClass}">
-          <div class="w-12 h-12 rounded-full overflow-hidden bg-slate-700">
-              <img src="${imgUrl}" alt="${name}" class="w-full h-full object-cover" style="transition: all 0.2s ease;">
+      <div class="flex items-center gap-3 p-3 rounded-lg ${statusClass}">
+        <div class="w-12 h-12 rounded-full overflow-hidden bg-slate-700">
+          <img src="${imgUrl}" alt="${name}" class="w-full h-full object-cover">
+        </div>
+        <div class="flex-1 min-w-0">
+          <div class="flex items-center">
+            <h4 class="font-medium truncate">${name}</h4>
+            ${identityChangedBadge}
           </div>
-          <div class="flex-1 min-w-0">
-              <div class="flex items-center">
-                  <h4 class="font-medium truncate">${name}</h4>
-                  ${identityChangedBadge}
-              </div>
-              ${
-                face.previous_identity
-                  ? `<p class="text-xs text-slate-400">Was: ${face.previous_identity}</p>`
-                  : ""
-              }
-              <p class="text-xs text-slate-400">${formatTime(
-                face.timestamp
-              )}</p>
-          </div>
-          <div class="text-xs px-2 py-1 rounded-full ${statusBadgeClass}">
-              ${statusText}
-          </div>
+          ${
+            face.previous_identity
+              ? `<p class="text-xs text-slate-400">Was: ${face.previous_identity}</p>`
+              : ""
+          }
+          <p class="text-xs text-slate-400">${formatTime(face.timestamp)}</p>
+        </div>
+        <div class="text-xs px-2 py-1 rounded-full ${statusBadgeClass}">
+          ${statusText}
+        </div>
       </div>
-        `;
+    `;
     })
     .join("");
 }
 
-// Update dataset users list UI - fixed to use data-user-id
+/**
+ * Update UI list of dataset users
+ */
 function updateDatasetUsersList() {
-  if (datasetUsers.length === 0) {
-    datasetUsersList.innerHTML = `
-        <div class="text-center py-8 text-slate-400">
-          <i class="fas fa-user-plus text-3xl mb-2"></i>
-          <p>No users in dataset</p>
-        </div>
-      `;
-    datasetCount.textContent = "0";
+  if (state.datasetUsers.length === 0) {
+    elements.datasetUsersList.innerHTML = `
+      <div class="text-center py-8 text-slate-400">
+        <i class="fas fa-user-plus text-3xl mb-2"></i>
+        <p>No users in dataset</p>
+      </div>
+    `;
+    elements.datasetCount.textContent = "0";
     return;
   }
 
-  datasetCount.textContent = datasetUsers.length.toString();
+  elements.datasetCount.textContent = state.datasetUsers.length.toString();
 
-  datasetUsersList.innerHTML = datasetUsers
+  elements.datasetUsersList.innerHTML = state.datasetUsers
     .map(
       (user) => `
-        <div class="flex items-center justify-between p-3 rounded-lg hover:bg-slate-700/50">
-          <div class="flex items-center gap-3">
-            <div class="w-10 h-10 rounded-full overflow-hidden bg-slate-700">
-              <img src="${user.image_path}" alt="${user.name}" class="w-full h-full object-cover">
-            </div>
-            <span class="font-medium">${user.name}</span>
-          </div>
-          <button class="text-red-400 hover:text-red-500 p-1 rounded-full hover:bg-red-500/10" data-user-id="${user.id}">
-            <i class="fas fa-trash-alt text-sm"></i>
-          </button>
+    <div class="flex items-center justify-between p-3 rounded-lg hover:bg-slate-700/50">
+      <div class="flex items-center gap-3">
+        <div class="w-10 h-10 rounded-full overflow-hidden bg-slate-700">
+          <img src="${user.image_path}" alt="${user.name}" class="w-full h-full object-cover">
         </div>
-        `
+        <span class="font-medium">${user.name}</span>
+      </div>
+      <button class="text-red-400 hover:text-red-500 p-1 rounded-full hover:bg-red-500/10" data-user-id="${user.id}">
+        <i class="fas fa-trash-alt text-sm"></i>
+      </button>
+    </div>
+  `
     )
     .join("");
 }
 
-// Format time for display
+// ===== Data Management =====
+/**
+ * Load data from server APIs
+ * @returns {Promise} Promise that resolves when data is loaded
+ */
+function loadData() {
+  // Load dataset users
+  const datasetPromise = fetch("/api/dataset/users")
+    .then((response) => response.json())
+    .then((data) => {
+      state.datasetUsers = data;
+      elements.datasetCount.textContent = data.length;
+      updateDatasetUsersList();
+      return data;
+    })
+    .catch((error) => {
+      console.error("Failed to load dataset users:", error);
+      state.datasetUsers = [];
+      elements.datasetCount.textContent = "0";
+      updateDatasetUsersList();
+      return [];
+    });
+
+  // Get system status
+  fetch("/api/status")
+    .then((response) => response.json())
+    .then((data) => updateFeatureStatus(data.features))
+    .catch((error) => console.error("Failed to load system status:", error));
+
+  return datasetPromise;
+}
+
+/**
+ * Check for dataset updates from other pages
+ */
+function checkForDatasetUpdates() {
+  const datasetUpdated = localStorage.getItem("datasetUpdated");
+
+  if (datasetUpdated === "true") {
+    // Clear flags
+    localStorage.removeItem("datasetUpdated");
+    const lastAddedPerson = localStorage.getItem("lastAddedPerson") || "";
+    localStorage.removeItem("lastAddedPerson");
+
+    // Reload dataset users
+    loadData().then(() => {
+      if (lastAddedPerson) {
+        showNotification(
+          `${lastAddedPerson} was successfully added to the dataset`,
+          "success"
+        );
+      } else {
+        showNotification("Dataset updated successfully", "success");
+      }
+    });
+  }
+}
+
+/**
+ * Load notification settings from server
+ */
+function loadNotificationSettings() {
+  fetch("/api/settings/email")
+    .then((response) => response.json())
+    .then((data) => {
+      elements.notificationEmail.value = data.email || "";
+      elements.enableNotifications.checked = data.enable_notifications;
+    })
+    .catch((error) =>
+      console.error("Error loading notification settings:", error)
+    );
+}
+
+/**
+ * Update and regenerate embedding dataset
+ */
+function updateDataset() {
+  if (
+    !confirm(
+      "This will regenerate all embeddings with augmentation. This may take some time. Continue?"
+    )
+  ) {
+    return;
+  }
+
+  // Show loading state
+  elements.updateDatasetBtn.innerHTML =
+    '<i class="fas fa-spinner fa-spin text-xl"></i><span class="text-sm">Processing...</span>';
+  elements.updateDatasetBtn.disabled = true;
+
+  fetch("/api/regenerate_embeddings", { method: "POST" })
+    .then((response) => response.json())
+    .then((data) => {
+      if (data.success) {
+        showNotification(
+          "Embedding regeneration started in background",
+          "info"
+        );
+
+        setTimeout(() => {
+          showNotification(
+            "This process may take a few minutes. The system will update automatically when complete.",
+            "info"
+          );
+        }, 3000);
+      } else {
+        showNotification("Failed to start embedding regeneration", "error");
+        resetUpdateButton();
+      }
+    })
+    .catch((error) => {
+      console.error("Error regenerating embeddings:", error);
+      showNotification("Error generating embeddings", "error");
+      resetUpdateButton();
+    });
+
+  function resetUpdateButton() {
+    elements.updateDatasetBtn.innerHTML =
+      '<i class="fas fa-sync-alt text-xl"></i><span class="text-sm">Update Dataset</span>';
+    elements.updateDatasetBtn.disabled = false;
+  }
+}
+
+/**
+ * Clean temporary image files
+ */
+function cleanTempFiles() {
+  if (
+    !confirm("Are you sure you want to delete all temporary capture files?")
+  ) {
+    return;
+  }
+
+  // Show loading
+  elements.cleanTempBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+  elements.cleanTempBtn.disabled = true;
+
+  // Send command via WebSocket if connected
+  if (state.socket && state.socket.readyState === WebSocket.OPEN) {
+    state.socket.send(
+      JSON.stringify({
+        type: "command",
+        command: "cleanup_temp",
+        days: 0,
+      })
+    );
+    // Button will be reset when we get response
+  } else {
+    // Fallback to REST API
+    fetch("/api/cleanup/temp_captures?days=0", { method: "DELETE" })
+      .then((response) => response.json())
+      .then((data) => {
+        if (data.success) {
+          showNotification(
+            `Cleaned up ${data.deleted_count} temporary files`,
+            "success"
+          );
+        } else {
+          showNotification("Failed to clean temporary files", "error");
+        }
+      })
+      .catch((error) => {
+        console.error("Error cleaning temp files:", error);
+        showNotification("Error cleaning temporary files", "error");
+      })
+      .finally(() => {
+        elements.cleanTempBtn.innerHTML =
+          '<i class="fas fa-trash-alt text-xl"></i><span class="text-sm">Clean Temp</span>';
+        elements.cleanTempBtn.disabled = false;
+      });
+  }
+}
+
+/**
+ * Delete user from recognition dataset
+ * @param {string} userId - User ID to delete
+ */
+function deleteUser(userId) {
+  if (!confirm("Are you sure you want to delete this user from the dataset?")) {
+    return;
+  }
+
+  const deleteButton = document.querySelector(
+    `button[data-user-id="${userId}"]`
+  );
+
+  // Show loading state
+  if (deleteButton) {
+    deleteButton.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+    deleteButton.disabled = true;
+  }
+
+  // Call API to delete user
+  fetch(`/api/dataset/users/${userId}`, { method: "DELETE" })
+    .then((response) => {
+      if (!response.ok) throw new Error(`HTTP error ${response.status}`);
+      return response.json();
+    })
+    .then((data) => {
+      if (data.success) {
+        // Update local data and UI
+        state.datasetUsers = state.datasetUsers.filter(
+          (user) => user.id !== userId
+        );
+        updateDatasetUsersList();
+        showNotification(`User ${userId} deleted from dataset`, "success");
+
+        // Restart recognition if active
+        if (state.isRecognizing) {
+          stopRecognition();
+          setTimeout(startRecognition, 500);
+        }
+      } else {
+        showNotification("Failed to delete user", "error");
+        resetDeleteButton();
+      }
+    })
+    .catch((error) => {
+      console.error("Error deleting user:", error);
+      showNotification(`Error deleting user: ${error.message}`, "error");
+      resetDeleteButton();
+    });
+
+  function resetDeleteButton() {
+    if (deleteButton) {
+      deleteButton.innerHTML = '<i class="fas fa-trash-alt text-sm"></i>';
+      deleteButton.disabled = false;
+    }
+  }
+}
+
+// ===== Notifications =====
+/**
+ * Handle security notifications from backend
+ * @param {Object} data - Notification data
+ */
+function handleSecurityNotification(data) {
+  const { type, camera_id, new_count, total_count } = data;
+
+  // Create appropriate message based on notification type
+  let message = "";
+  if (type === "new_face") {
+    message =
+      new_count > 1
+        ? `Phát hiện ${new_count} người lạ mới tại camera ${camera_id}`
+        : `Phát hiện người lạ mới tại camera ${camera_id}`;
+  } else if (type === "periodic") {
+    message = `Cảnh báo: ${total_count} người lạ đang xuất hiện tại camera ${camera_id}`;
+  }
+
+  // Show in-app notification
+  showNotification(message, "warning");
+
+  // Show browser notification if permitted
+  if (Notification.permission === "granted") {
+    const notification = createSecurityNotification(data);
+    new Notification(notification.title, notification);
+  } else if (Notification.permission !== "denied") {
+    Notification.requestPermission().then((permission) => {
+      if (permission === "granted") {
+        const notification = createSecurityNotification(data);
+        new Notification(notification.title, notification);
+      }
+    });
+  }
+}
+
+/**
+ * Create notification content that matches email format
+ * @param {Object} data - Notification data
+ * @returns {Object} Notification options
+ */
+function createSecurityNotification(data) {
+  const { type, camera_id, new_count, total_count, timestamp } = data;
+
+  // Format time
+  const time = new Date(timestamp || Date.now()).toLocaleString("vi-VN");
+
+  // Default icon
+  const defaultIcon = "https://cdn-icons-png.flaticon.com/512/1680/1680012.png";
+
+  // Create notification content based on type
+  if (type === "new_face") {
+    const title = "CẢNH BÁO AN NINH";
+    let body =
+      new_count > 1
+        ? `Hệ thống đã phát hiện ${new_count} người lạ mới tại camera ${camera_id}.\n`
+        : `Hệ thống đã phát hiện người lạ mới tại camera ${camera_id}.\n`;
+
+    body += `Tổng cộng có ${total_count} người lạ đang xuất hiện.\n`;
+    body += `Thời gian: ${time}\n`;
+    body += `Vui lòng kiểm tra!`;
+
+    return {
+      title,
+      body,
+      icon: "/static/images/alert-icon.png" || defaultIcon,
+    };
+  } else if (type === "periodic") {
+    return {
+      title: "CẬP NHẬT AN NINH",
+      body:
+        `Hiện có ${total_count} người lạ đang xuất hiện tại camera ${camera_id}.\n` +
+        `Thời gian: ${time}\n` +
+        `Đây là thông báo định kỳ.`,
+      icon: "/static/images/info-icon.png" || defaultIcon,
+    };
+  }
+
+  // Default fallback
+  return {
+    title: "THÔNG BÁO HỆ THỐNG",
+    body: "Có cảnh báo mới từ hệ thống an ninh",
+    icon: defaultIcon,
+  };
+}
+
+/**
+ * Test notification system with mock data
+ */
+function testNotification() {
+  // Create sample security notification
+  const mockData = {
+    type: "new_face",
+    camera_id: "Camera Test",
+    new_count: 1,
+    total_count: 3,
+    timestamp: new Date().toISOString(),
+  };
+
+  handleSecurityNotification(mockData);
+}
+
+/**
+ * Save notification email settings
+ */
+function saveNotificationSettingsHandler() {
+  const email = elements.notificationEmail.value.trim();
+  const enableNotifs = elements.enableNotifications.checked;
+
+  // Validate email
+  if (email && !/^\S+@\S+\.\S+$/.test(email)) {
+    elements.emailError.classList.remove("hidden");
+    return;
+  }
+
+  elements.emailError.classList.add("hidden");
+
+  // Save to server
+  fetch("/api/settings/email", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      email: email,
+      enable_notifications: enableNotifs,
+    }),
+  })
+    .then((response) => response.json())
+    .then((data) => {
+      if (data.success) {
+        showNotification("Notification settings saved", "success");
+        elements.notificationSettings.classList.add("hidden");
+      } else {
+        showNotification(
+          "Failed to save settings: " + (data.message || "Unknown error"),
+          "error"
+        );
+      }
+    })
+    .catch((error) => {
+      console.error("Error saving notification settings:", error);
+      showNotification("Error saving settings", "error");
+    });
+}
+
+// ===== Utility Functions =====
+/**
+ * Format timestamp for display
+ * @param {Date} date - Date to format
+ * @returns {string} Formatted time string
+ */
 function formatTime(date) {
   if (!date) return "";
 
@@ -977,256 +1194,103 @@ function formatTime(date) {
   }
 }
 
-// Update dataset
-function updateDataset() {
-  // Show loading and confirmation dialog
-  if (
-    !confirm(
-      "This will regenerate all embeddings with augmentation. This may take some time. Continue?"
-    )
-  ) {
-    return;
-  }
-
-  // Show loading state
-  updateDatasetBtn.innerHTML =
-    '<i class="fas fa-spinner fa-spin text-xl"></i><span class="text-sm">Processing...</span>';
-  updateDatasetBtn.disabled = true;
-
-  // Call the new API endpoint to regenerate embeddings
-  fetch("/api/regenerate_embeddings", {
-    method: "POST",
-  })
-    .then((response) => response.json())
-    .then((data) => {
-      if (data.success) {
-        showNotification(
-          "Embedding regeneration started in background",
-          "info"
-        );
-
-        // Show additional message about waiting
-        setTimeout(() => {
-          showNotification(
-            "This process may take a few minutes. The system will update automatically when complete.",
-            "info"
-          );
-        }, 3000);
-      } else {
-        showNotification("Failed to start embedding regeneration", "error");
-
-        // Reset button
-        updateDatasetBtn.innerHTML =
-          '<i class="fas fa-sync-alt text-xl"></i><span class="text-sm">Update Dataset</span>';
-        updateDatasetBtn.disabled = false;
-      }
-    })
-    .catch((error) => {
-      console.error("Error regenerating embeddings:", error);
-      showNotification("Error generating embeddings", "error");
-
-      // Reset button
-      updateDatasetBtn.innerHTML =
-        '<i class="fas fa-sync-alt text-xl"></i><span class="text-sm">Update Dataset</span>';
-      updateDatasetBtn.disabled = false;
-    });
-}
-
-// Clean temp files
-function cleanTempFiles() {
-  // Show confirmation dialog
-  if (confirm("Are you sure you want to delete all temporary capture files?")) {
-    // Show loading
-    cleanTempBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
-    cleanTempBtn.disabled = true;
-
-    // Send command via WebSocket if connected
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      socket.send(
-        JSON.stringify({
-          type: "command",
-          command: "cleanup_temp",
-          days: 0,
-        })
-      );
-
-      // Will reset button when we get a response
-    } else {
-      // Fallback to REST API
-      fetch("/api/cleanup/temp_captures?days=0", {
-        method: "DELETE",
-      })
-        .then((response) => response.json())
-        .then((data) => {
-          if (data.success) {
-            showNotification(
-              `Cleaned up ${data.deleted_count} temporary files`,
-              "success"
-            );
-          } else {
-            showNotification("Failed to clean temporary files", "error");
-          }
-        })
-        .catch((error) => {
-          console.error("Error cleaning temp files:", error);
-          showNotification("Error cleaning temporary files", "error");
-        })
-        .finally(() => {
-          cleanTempBtn.innerHTML =
-            '<i class="fas fa-trash-alt text-xl"></i><span class="text-sm">Clean Temp</span>';
-          cleanTempBtn.disabled = false;
-        });
-    }
-  }
-}
-
-// Test notification - updated to use same format as security notifications
-function testNotification() {
-  // Tạo dữ liệu mẫu cho thông báo bảo mật
-  const mockData = {
-    type: "new_face",
-    camera_id: "Camera Test",
-    new_count: 1,
-    total_count: 3,
-    timestamp: new Date().toISOString(),
+/**
+ * Display notification toast
+ * @param {string} message - Notification message
+ * @param {string} type - Notification type: success, error, warning, info
+ */
+function showNotification(message, type = "info") {
+  // Map type to color class
+  const typeClasses = {
+    success: "bg-green-600",
+    error: "bg-red-600",
+    warning: "bg-amber-600",
+    info: "bg-blue-600",
   };
 
-  // Gọi hàm xử lý thông báo bảo mật
-  handleSecurityNotification(mockData);
-}
+  // Map type to icon
+  const typeIcons = {
+    success: "fa-check-circle",
+    error: "fa-exclamation-circle",
+    warning: "fa-exclamation-triangle",
+    info: "fa-info-circle",
+  };
 
-// Save notification settings
-function saveNotificationSettingsHandler() {
-  const email = notificationEmail.value.trim();
-  const enableNotifs = enableNotifications.checked;
-
-  if (email && !/^\S+@\S+\.\S+$/.test(email)) {
-    emailError.classList.remove("hidden");
-    return;
-  }
-
-  emailError.classList.add("hidden");
-
-  // Save to server via API
-  fetch("/api/settings/email", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      email: email,
-      enable_notifications: enableNotifs,
-    }),
-  })
-    .then((response) => response.json())
-    .then((data) => {
-      if (data.success) {
-        showNotification("Notification settings saved", "success");
-        notificationSettings.classList.add("hidden");
-      } else {
-        showNotification(
-          "Failed to save settings: " + (data.message || "Unknown error"),
-          "error"
-        );
-      }
-    })
-    .catch((error) => {
-      console.error("Error saving notification settings:", error);
-      showNotification("Error saving settings", "error");
-    });
-}
-
-// Delete user from dataset - updated to work with data-user-id
-function deleteUser(userId) {
-  if (confirm("Are you sure you want to delete this user from the dataset?")) {
-    // Find the button by data attribute instead of onclick
-    const deleteButton = document.querySelector(
-      `button[data-user-id="${userId}"]`
-    );
-
-    // Show loading state
-    if (deleteButton) {
-      deleteButton.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
-      deleteButton.disabled = true;
-    }
-
-    // Call API to delete the user
-    fetch(`/api/dataset/users/${userId}`, {
-      method: "DELETE",
-    })
-      .then((response) => {
-        if (!response.ok) {
-          throw new Error(`HTTP error ${response.status}`);
-        }
-        return response.json();
-      })
-      .then((data) => {
-        if (data.success) {
-          // Remove from local data and update UI
-          datasetUsers = datasetUsers.filter((user) => user.id !== userId);
-          updateDatasetUsersList();
-          showNotification(`User ${userId} deleted from dataset`, "success");
-
-          // Restart recognition if active to apply changes
-          if (isRecognizing) {
-            stopRecognition();
-            setTimeout(startRecognition, 500);
-          }
-        } else {
-          showNotification("Failed to delete user", "error");
-
-          // Reset button state
-          if (deleteButton) {
-            deleteButton.innerHTML = '<i class="fas fa-trash-alt text-sm"></i>';
-            deleteButton.disabled = false;
-          }
-        }
-      })
-      .catch((error) => {
-        console.error("Error deleting user:", error);
-        showNotification(`Error deleting user: ${error.message}`, "error");
-
-        // Reset button state
-        if (deleteButton) {
-          deleteButton.innerHTML = '<i class="fas fa-trash-alt text-sm"></i>';
-          deleteButton.disabled = false;
-        }
-      });
-  }
-}
-
-// Show notification toast
-function showNotification(message, type = "info") {
   const toast = document.createElement("div");
   toast.className = `fixed bottom-4 left-4 px-4 py-2 rounded-lg shadow-lg flex items-center gap-2 ${
-    type === "success"
-      ? "bg-green-600"
-      : type === "error"
-      ? "bg-red-600"
-      : type === "warning"
-      ? "bg-amber-600"
-      : "bg-blue-600"
+    typeClasses[type] || typeClasses.info
   }`;
 
   toast.innerHTML = `
-        <i class="fas ${
-          type === "success"
-            ? "fa-check-circle"
-            : type === "error"
-            ? "fa-exclamation-circle"
-            : type === "warning"
-            ? "fa-exclamation-triangle"
-            : "fa-info-circle"
-        }"></i>
-        <span>${message}</span>
-    `;
+    <i class="fas ${typeIcons[type] || typeIcons.info}"></i>
+    <span>${message}</span>
+  `;
 
   document.body.appendChild(toast);
 
-  setTimeout(() => {
-    toast.remove();
-  }, 3000);
+  // Remove after 3 seconds
+  setTimeout(() => toast.remove(), 3000);
 }
 
-// Initialize the app
+// ===== Event Listeners =====
+/**
+ * Set up all event handlers
+ */
+function setupEventListeners() {
+  // Camera controls
+  elements.enableCameraBtn.addEventListener("click", startAll);
+  elements.startBtn.addEventListener("click", startAll);
+  elements.stopBtn.addEventListener("click", stopAll);
+  elements.cameraSelect.addEventListener("change", switchCamera);
+
+  // Control panel
+  elements.addPersonBtn.addEventListener(
+    "click",
+    () => (window.location.href = "/add_person")
+  );
+  elements.updateDatasetBtn.addEventListener("click", updateDataset);
+  elements.cleanTempBtn.addEventListener("click", cleanTempFiles);
+  elements.testNotificationBtn.addEventListener("click", testNotification);
+
+  // Stats and popups
+  elements.statsBtn.addEventListener("click", () =>
+    elements.statsPopup.classList.toggle("hidden")
+  );
+  elements.showTechStackBtn.addEventListener("click", () =>
+    elements.techStackPopup.classList.toggle("hidden")
+  );
+  elements.closeTechStackBtn.addEventListener("click", () =>
+    elements.techStackPopup.classList.add("hidden")
+  );
+
+  // Notification settings
+  elements.closeNotificationSettings.addEventListener("click", () =>
+    elements.notificationSettings.classList.add("hidden")
+  );
+  elements.saveNotificationSettings.addEventListener(
+    "click",
+    saveNotificationSettingsHandler
+  );
+
+  // Dataset user management - delegation pattern for better performance
+  elements.datasetUsersList.addEventListener("click", (event) => {
+    const deleteBtn = event.target.closest("button");
+    if (deleteBtn) {
+      const userId = deleteBtn.dataset.userId;
+      if (userId) deleteUser(userId);
+    }
+  });
+
+  // Check for updates when page becomes visible
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") {
+      checkForDatasetUpdates();
+    }
+  });
+
+  // Check for updates when window gets focus
+  window.addEventListener("focus", checkForDatasetUpdates);
+}
+
+// Initialize on page load
 window.onload = init;
