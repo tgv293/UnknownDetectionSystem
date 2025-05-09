@@ -1,9 +1,9 @@
 {
-    "sender": "vandonggiap@gmail.com",
-    "receiver": "vantaigiap01@gmail.com",
+    "sender": "email@gmail.com",
+    "receiver": "email@gmail.com",
     "smtp_server": "smtp.gmail.com",
     "smtp_port": 587,
-    "username": "vandonggiap@gmail.com",
-    "password": "athq fhty zjxc inot",
+    "username": "email@gmail.com",
+    "password": "google password",
     "enable_notifications": true
 }
