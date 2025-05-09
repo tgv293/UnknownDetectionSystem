@@ -62,11 +62,4 @@ Hệ thống phát hiện người lạ xâm nhập sử dụng công nghệ nh�
 
 ## 🚀 Hướng dẫn cài đặt
 
-### Cài đặt với Docker
-
-```bash
-# Tạo image Docker
-docker build -t unknown-detection-system .
-
-# Chạy container
-docker run -p 7860:7860 unknown-detection-system
+### Cài đặt với install.bat sau khi cài env conda
