@@ -485,9 +485,13 @@ async def delete_dataset_user(user_id: str):
 
 
 # === Embeddings Management ===
+embedding_generation_complete = asyncio.Event()
 @app.post("/api/regenerate_embeddings")
 async def regenerate_embeddings(background_tasks: BackgroundTasks):
     """Regenerate embeddings with data augmentation"""
+    global embedding_generation_complete
+    embedding_generation_complete.clear()  # Reset state
+    
     try:
         def create_embeddings_task():
             import subprocess
@@ -505,14 +509,35 @@ async def regenerate_embeddings(background_tasks: BackgroundTasks):
                     recognizer.reset_caches()
                     
                 logger.info("Embeddings regenerated successfully with augmentation")
+                
+                # Set event when complete
+                embedding_generation_complete.set()
             except Exception as e:
                 logger.error(f"Error regenerating embeddings: {e}")
+                embedding_generation_complete.set()  # Set even on failure
                 
         background_tasks.add_task(create_embeddings_task)
+        # Start another task to notify when complete
+        background_tasks.add_task(notify_embedding_complete)
         return {"success": True, "message": "Regenerating embeddings in background"}
     except Exception as e:
         logger.error(f"Error starting embeddings regeneration: {e}")
         raise HTTPException(status_code=500, detail=f"Error starting embeddings regeneration: {str(e)}")
+
+async def notify_embedding_complete():
+    """Wait for embeddings to complete and notify clients"""
+    await embedding_generation_complete.wait()
+    
+    # Notify all active websocket clients
+    for ws in active_websockets:
+        try:
+            await ws.send_json({
+                "type": "command_result",
+                "command": "embeddings_complete",
+                "success": True
+            })
+        except:
+            pass  # Ignore errors
 
 
 # === Email Settings ===
