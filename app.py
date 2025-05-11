@@ -299,27 +299,28 @@ async def reset_caches():
 # === WebSocket Handlers ===
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    """Handle WebSocket connections for real-time face recognition"""
+    """Handle WebSocket connections for real-time face recognition and admin operations"""
     global recognizer, active_websockets, is_processing_active
     
     await websocket.accept()
     active_websockets.append(websocket)
     
     try:
-        # Initialize recognizer if needed
-        rec = initialize_recognizer("websocket")
-        
-        # Start background processing if not already running
-        if not is_processing_active:
-            is_processing_active = True
-            asyncio.create_task(process_frame_queue())
-        
-        # WebSocket communication loop
+        # Main WebSocket communication loop - no recognizer initialized yet
         while True:
             data = await websocket.receive_text()
             message = json.loads(data)
             
             if message["type"] == "frame":
+                # Only initialize recognizer when frames are received
+                if not recognizer:
+                    rec = initialize_recognizer("websocket")
+                
+                # Start background processing if not already running
+                if not is_processing_active:
+                    is_processing_active = True
+                    asyncio.create_task(process_frame_queue())
+                
                 # Process video frame
                 image_data = message["data"].split(",")[1]  # Remove data:image/jpeg;base64,
                 
@@ -328,6 +329,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     await frame_queue.put((websocket, image_data))
             
             elif message["type"] == "command":
+                # Handle commands - some don't need recognizer
                 await handle_websocket_command(websocket, message)
                    
     except WebSocketDisconnect:
@@ -346,12 +348,22 @@ async def websocket_endpoint(websocket: WebSocket):
         if websocket in active_websockets:
             active_websockets.remove(websocket)
 
-
 async def handle_websocket_command(websocket: WebSocket, message: dict):
-    """Handle WebSocket commands"""
+    """Handle WebSocket commands - with or without recognizer"""
+    global recognizer
     command = message["command"]
     
+    # Commands that require recognizer
     if command == "reset_caches":
+        if not recognizer:
+            await websocket.send_json({
+                "type": "command_result",
+                "command": "reset_caches",
+                "success": False,
+                "message": "Recognition system not initialized"
+            })
+            return
+            
         recognizer.reset_caches()
         await websocket.send_json({
             "type": "command_result",
@@ -359,14 +371,20 @@ async def handle_websocket_command(websocket: WebSocket, message: dict):
             "success": True
         })
     
-    elif command == "embeddings_complete":
+    # Commands that don't require recognizer
+    elif command == "regenerate_embeddings":
+        # Start background task
+        background_tasks = BackgroundTasks()
+        background_tasks.add_task(create_embeddings_task)
+        background_tasks.add_task(notify_embedding_complete)
+        
         await websocket.send_json({
             "type": "command_result",
-            "command": "embeddings_complete",
+            "command": "regenerate_embeddings",
             "success": True,
-            "message": "Embeddings have been regenerated successfully"
+            "message": "Regenerating embeddings in background"
         })
-       
+    
     elif command == "cleanup_temp":
         days = message.get("days", 0)
         result = await cleanup_temp_captures(days)
@@ -376,7 +394,6 @@ async def handle_websocket_command(websocket: WebSocket, message: dict):
             "success": result.success,
             "data": result.dict()
         })
-
 
 async def process_frame_queue():
     """Process frames from the queue in the background"""
