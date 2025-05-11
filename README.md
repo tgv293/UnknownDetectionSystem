@@ -79,7 +79,7 @@ conda activate unknown_detection_system
 Chạy script install.bat để tự động cài đặt các dependencies:
 
 ```bash
-./install.bat
+install.bat
 ```
 
 ---
@@ -91,11 +91,11 @@ Chạy script install.bat để tự động cài đặt các dependencies:
 Sử dụng uvicorn để chạy ứng dụng:
 
 ```bash
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+uvicorn app:app --reload
 ```
 
 ### 2️⃣ **Truy cập giao diện web**
 
-Mở trình duyệt và truy cập: [http://localhost:8000](http://localhost:8000)
+Mở trình duyệt và truy cập: [127.0.0.1:8000)
 
 ---
