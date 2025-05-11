@@ -98,12 +98,12 @@ class FaceRecognizer:
         """Load embeddings database and HNSW index."""
         if self.embeddings_loaded:
             return True
-            
+                
         try:
             if not os.path.exists(self.embeddings_path):
                 logger.error(f"Embeddings database not found at {self.embeddings_path}")
                 return False
-                
+                    
             logger.info(f"Loading embeddings database from {self.embeddings_path}")
             with open(self.embeddings_path, 'rb') as f:
                 data = pickle.load(f)
@@ -115,14 +115,18 @@ class FaceRecognizer:
             else:
                 # Legacy format
                 self.embeddings_db = data
-                
+                    
             # Load or rebuild HNSW index
             hnsw_path = EMBEDDINGS_HNSW_PATH
             if os.path.exists(hnsw_path):
                 try:
-                    self._initialize_hnsw()
+                    # Create index object without initializing it
+                    self.hnsw_index = hnswlib.Index(space='cosine', dim=self.embedding_dim)
                     self.hnsw_index.load_index(hnsw_path, max_elements=len(self.index_id_to_info))
                     logger.info(f"HNSW index loaded with {self.hnsw_index.get_current_count()} vectors")
+                    
+                    # Set search parameters
+                    self.hnsw_index.set_ef(self.ef_search)
                     
                     # Verify index is cosine type
                     if not self._is_cosine_index(self.hnsw_index):
@@ -134,7 +138,7 @@ class FaceRecognizer:
             else:
                 logger.info("HNSW index not found, rebuilding...")
                 self._rebuild_hnsw_index()
-                
+                    
             # Load source info if available
             source_info_path = EMBEDDINGS_SOURCE_INFO_PATH
             if os.path.exists(source_info_path):
@@ -147,12 +151,12 @@ class FaceRecognizer:
             # Database stats
             person_count = len(self.embeddings_db)
             no_mask_count = sum(len(person_data.get("no_mask", {})) 
-                              for person_data in self.embeddings_db.values())
+                            for person_data in self.embeddings_db.values())
             with_mask_count = sum(len(person_data.get("with_mask", {})) 
                                 for person_data in self.embeddings_db.values())
             
             logger.info(f"Embeddings loaded: {person_count} people, "
-                       f"{no_mask_count} no_mask, {with_mask_count} with_mask")
+                    f"{no_mask_count} no_mask, {with_mask_count} with_mask")
             
             self.embeddings_loaded = True
             return True
