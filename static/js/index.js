@@ -96,6 +96,9 @@ function init() {
   enumerateWebcams();
   checkForDatasetUpdates();
 
+  // Connect WebSocket immediately
+  setupWebSocketConnection();
+
   if (!localStorage.getItem("datasetUpdated")) {
     loadData();
   }
@@ -408,9 +411,12 @@ function startRecognition() {
     window.pauseOverlay = null;
   }
 
-  // Connect WebSocket
-  setupWebSocketConnection();
-  updateConnectionStatus("connecting");
+  // Use existing WebSocket connection
+  if (!state.socket || state.socket.readyState !== WebSocket.OPEN) {
+    // Only reconnect if not connected
+    setupWebSocketConnection();
+  }
+  updateConnectionStatus("connected");
 
   state.isRecognizing = true;
   elements.startBtn.disabled = true;
@@ -432,10 +438,8 @@ function stopRecognition() {
   elements.stopBtn.disabled = true;
   elements.recordingIndicator.classList.add("hidden");
 
-  // Close WebSocket if open
-  if (state.socket && state.socket.readyState === WebSocket.OPEN) {
-    state.socket.close();
-  }
+  // Don't close WebSocket - keep it connected
+  // Just stop sending frames
 
   // Clear face boxes
   elements.faceBoxesContainer.innerHTML = "";
