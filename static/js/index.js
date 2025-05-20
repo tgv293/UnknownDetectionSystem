@@ -23,6 +23,7 @@ const state = {
     detection_time: 0,
     spoof_detection_time: 0,
   },
+  boxRenderer: null, // WebGL renderer for face boxes
 };
 
 // ===== DOM Elements =====
@@ -159,6 +160,26 @@ function enumerateWebcams() {
 }
 
 /**
+ * Initialize WebGL box renderer
+ */
+function initBoxRenderer() {
+  if (state.boxRenderer) {
+    state.boxRenderer.destroy();
+  }
+
+  const cameraContainer = document.querySelector(".camera-container");
+  state.boxRenderer = new WebGLBoxRenderer(cameraContainer, {
+    lineWidth: 2,
+    defaultColor: [0, 1, 0, 1], // Green for known faces
+    unknownColor: [1, 0.45, 0.1, 1], // Orange for unknown
+    spoofColor: [1, 0, 0, 1], // Red for spoofed
+  });
+
+  // Set video element for coordinate scaling
+  state.boxRenderer.setVideoElement(elements.video);
+}
+
+/**
  * Start camera with selected device
  * @returns {Promise} Stream promise
  */
@@ -190,6 +211,9 @@ function startCamera() {
       elements.video.onloadedmetadata = () => {
         elements.canvas.width = elements.video.videoWidth;
         elements.canvas.height = elements.video.videoHeight;
+        if (state.boxRenderer) {
+          state.boxRenderer.setVideoElement(elements.video);
+        }
       };
 
       return stream;
@@ -220,7 +244,10 @@ function startAll() {
   if (state.isRecognizing) return;
 
   startCamera()
-    .then(() => startRecognition())
+    .then(() => {
+      initBoxRenderer();
+      startRecognition();
+    })
     .catch((err) => console.error("Failed to start camera:", err));
 }
 
@@ -259,7 +286,10 @@ function switchCamera() {
   if (state.isRecognizing) {
     stopRecognition();
     startCamera()
-      .then(() => startRecognition())
+      .then(() => {
+        initBoxRenderer();
+        startRecognition();
+      })
       .catch((err) => console.error("Failed to switch camera:", err));
   } else if (state.activeStream) {
     startCamera().catch((err) =>
@@ -443,6 +473,11 @@ function stopRecognition() {
 
   // Clear face boxes
   elements.faceBoxesContainer.innerHTML = "";
+
+  // Clear WebGL boxes
+  if (state.boxRenderer) {
+    state.boxRenderer.clearBoxes();
+  }
 }
 
 /**
@@ -507,17 +542,23 @@ function handleRecognitionResults(faces, performance) {
     updateStatsDisplay();
   }
 
-  // Clear existing face boxes
-  elements.faceBoxesContainer.innerHTML = "";
-
-  // Process detections
-  const updatesNeeded = [];
-
+  // Process detections with WebGL renderer
   if (faces && faces.length > 0) {
+    // Kiểm tra lại và đảm bảo cờ is_unknown được đặt chính xác cho mỗi khuôn mặt
     faces.forEach((face) => {
-      // Create face box for live display
-      createFaceBox(face);
+      // Đặt is_unknown=true cho tất cả các mặt có tên "Unknown" hoặc không có tên
+      // Điều này đảm bảo màu sắc luôn nhất quán
+      face.is_unknown =
+        !face.name || face.name === "Unknown" || face.name === "unknown";
+    });
 
+    // Sau khi sửa, cập nhật các khung mặt
+    state.boxRenderer.updateBoxes(faces);
+
+    // Phần còn lại của code xử lý...
+    const updatesNeeded = [];
+
+    faces.forEach((face) => {
       // Use track ID to maintain identity persistence
       const trackId = face.track_id !== undefined ? face.track_id : -1;
 
@@ -550,79 +591,19 @@ function handleRecognitionResults(faces, performance) {
         });
       }
     });
+
+    // Update detected faces list
+    if (updatesNeeded.length > 0) {
+      // Add new faces to top of list, maintain max 20 items
+      state.detectedFaces = [...updatesNeeded, ...state.detectedFaces].slice(
+        0,
+        20
+      );
+      updateDetectedFacesList();
+    }
+  } else {
+    state.boxRenderer.clearBoxes();
   }
-
-  // Update detected faces list
-  if (updatesNeeded.length > 0) {
-    // Add new faces to top of list, maintain max 20 items
-    state.detectedFaces = [...updatesNeeded, ...state.detectedFaces].slice(
-      0,
-      20
-    );
-    updateDetectedFacesList();
-  }
-}
-
-/**
- * Create visual box around detected face
- * @param {Object} face - Face detection data
- */
-function createFaceBox(face) {
-  const [x1, y1, x2, y2] = face.bbox;
-
-  // Calculate scale between video and display dimensions
-  const displayWidth = elements.video.clientWidth;
-  const displayHeight = elements.video.clientHeight;
-  const videoWidth = elements.video.videoWidth || elements.canvas.width;
-  const videoHeight = elements.video.videoHeight || elements.canvas.height;
-
-  // Scale coordinates to match display size
-  const scaleX = displayWidth / videoWidth;
-  const scaleY = displayHeight / videoHeight;
-
-  const scaledX1 = x1 * scaleX;
-  const scaledY1 = y1 * scaleY;
-  const scaledWidth = (x2 - x1) * scaleX;
-  const scaledHeight = (y2 - y1) * scaleY;
-
-  // Create face box element
-  const faceBox = document.createElement("div");
-  faceBox.className = "face-box";
-
-  // Position and size the box
-  Object.assign(faceBox.style, {
-    width: `${scaledWidth}px`,
-    height: `${scaledHeight}px`,
-    left: `${scaledX1}px`,
-    top: `${scaledY1}px`,
-    borderColor: face.is_spoofed
-      ? "#ef4444" // Red for spoofed
-      : face.is_unknown
-      ? "#f97316" // Orange for unknown
-      : "#22c55e", // Green for known faces
-  });
-
-  // Create face label
-  const faceLabel = document.createElement("div");
-  faceLabel.className = "face-label";
-
-  // Set label text with status indicators
-  let labelText = face.name || "Unknown";
-  if (face.is_spoofed) labelText += " [SPOOF]";
-  if (face.wearing_mask) labelText += " [MASK]";
-
-  faceLabel.textContent = labelText;
-
-  // Add confidence percentage if available
-  if (face.confidence) {
-    const confidenceSpan = document.createElement("span");
-    confidenceSpan.className = "ml-1 text-xs text-slate-400";
-    confidenceSpan.textContent = `${(face.confidence * 100).toFixed(0)}%`;
-    faceLabel.appendChild(confidenceSpan);
-  }
-
-  faceBox.appendChild(faceLabel);
-  elements.faceBoxesContainer.appendChild(faceBox);
 }
 
 // ===== UI Updates =====
@@ -1236,6 +1217,26 @@ function showNotification(message, type = "info") {
   setTimeout(() => toast.remove(), 3000);
 }
 
+/**
+ * Clean up resources before page unload
+ */
+function cleanup() {
+  // Stop any active processes
+  stopRecognition();
+  stopCamera();
+
+  // Clean up WebGL renderer
+  if (state.boxRenderer) {
+    state.boxRenderer.destroy();
+    state.boxRenderer = null;
+  }
+
+  // Close WebSocket connection
+  if (state.socket && state.socket.readyState === WebSocket.OPEN) {
+    state.socket.close();
+  }
+}
+
 // ===== Event Listeners =====
 /**
  * Set up all event handlers
@@ -1294,6 +1295,9 @@ function setupEventListeners() {
 
   // Check for updates when window gets focus
   window.addEventListener("focus", checkForDatasetUpdates);
+
+  // Clean up resources before page unload
+  window.addEventListener("beforeunload", cleanup);
 }
 
 // Initialize on page load

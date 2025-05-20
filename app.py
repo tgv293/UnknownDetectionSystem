@@ -118,6 +118,9 @@ def prepare_face_result(face):
     face_result = {k: v for k, v in face.items() if k != 'face_image'}
     face_result["bbox"] = bbox
     
+    # Add is_unknown flag - THIS IS THE NEW CODE TO ADD
+    face_result["is_unknown"] = face.get("display_name", face.get("name", "unknown")) == "unknown"
+    
     # Add face image as base64 if available
     if "face_image" in face and face["face_image"] is not None:
         try:
@@ -134,7 +137,6 @@ def prepare_face_result(face):
             face_result["image"] = None
     
     return face_result
-
 
 # === Application Lifecycle ===
 @app.on_event("startup")

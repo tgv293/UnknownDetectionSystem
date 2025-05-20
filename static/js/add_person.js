@@ -40,6 +40,7 @@ const state = {
   countdownTimer: null,
   captureInProgress: false,
   availableCameras: [],
+  boxRenderer: null, // New WebGL box renderer
 };
 
 // ===== DOM ELEMENTS =====
@@ -117,6 +118,25 @@ function enumerateWebcams() {
 }
 
 /**
+ * Initialize the WebGL box renderer
+ */
+function initBoxRenderer() {
+  if (state.boxRenderer) {
+    state.boxRenderer.destroy();
+  }
+
+  const captureArea = document.querySelector(".capture-area");
+  state.boxRenderer = new WebGLBoxRenderer(captureArea, {
+    lineWidth: 2,
+    defaultColor: [0.06, 0.73, 0.51, 1], // Teal color for face detection
+    showLabels: false, // Tắt hiển thị nhãn cho trang add_person
+  });
+
+  // Set video element for coordinate scaling
+  state.boxRenderer.setVideoElement(elements.videoElement);
+}
+
+/**
  * Switch to the selected camera
  */
 function switchCamera() {
@@ -162,7 +182,11 @@ async function initCamera() {
 
     // Wait for video to load
     await new Promise((resolve) => {
-      elements.videoElement.onloadedmetadata = resolve;
+      elements.videoElement.onloadedmetadata = () => {
+        initBoxRenderer();
+        setupROI();
+        resolve();
+      };
     });
 
     // After camera permission, update labels
@@ -170,8 +194,6 @@ async function initCamera() {
       setTimeout(enumerateWebcams, 500);
     }
 
-    setupROI();
-    initializeFaceOverlay();
     return true;
   } catch (error) {
     throw new Error(`Camera access error: ${error.message}`);
@@ -198,14 +220,6 @@ function setupROI() {
 }
 
 /**
- * Initialize the face detection overlay canvas
- */
-function initializeFaceOverlay() {
-  elements.faceOverlay.width = elements.videoElement.videoWidth;
-  elements.faceOverlay.height = elements.videoElement.videoHeight;
-}
-
-/**
  * Stop camera and clear all timers
  */
 function stopCamera() {
@@ -224,16 +238,10 @@ function stopCamera() {
     elements.videoElement.srcObject = null;
   }
 
-  clearFaceOverlay();
-}
-
-/**
- * Clear the face detection overlay
- */
-function clearFaceOverlay() {
-  const canvas = elements.faceOverlay;
-  const ctx = canvas.getContext("2d");
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  // Clear WebGL face boxes
+  if (state.boxRenderer) {
+    state.boxRenderer.clearBoxes();
+  }
 }
 
 // ===== SESSION MANAGEMENT =====
@@ -683,49 +691,17 @@ function hideIssue() {
  */
 function updateFaceVisualization(faces) {
   if (faces && faces.length > 0) {
-    drawFaceBoxes(faces);
+    // Add extra properties needed by the renderer
+    const boxData = faces.map((face) => ({
+      ...face,
+      name: "", // No name needed for add_person page
+      is_unknown: false, // Not used in add_person
+      is_spoofed: false, // Not used in add_person
+    }));
+    state.boxRenderer.updateBoxes(boxData);
   } else {
-    clearFaceOverlay();
+    state.boxRenderer.clearBoxes();
   }
-}
-
-/**
- * Draw face bounding boxes and landmarks
- */
-function drawFaceBoxes(faces) {
-  const canvas = elements.faceOverlay;
-  const ctx = canvas.getContext("2d");
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-  faces.forEach((face) => {
-    const [x1, y1, x2, y2] = face.bbox;
-    const width = x2 - x1;
-    const height = y2 - y1;
-
-    // Draw bounding box
-    ctx.strokeStyle = "#10B981"; // Green
-    ctx.lineWidth = 2;
-    ctx.strokeRect(x1, y1, width, height);
-
-    // Draw confidence
-    ctx.fillStyle = "#10B981";
-    ctx.font = "14px Arial";
-    ctx.fillText(
-      `${Math.round(face.confidence * 100)}%`,
-      x1,
-      y1 > 20 ? y1 - 5 : y1 + 15
-    );
-
-    // Draw landmarks
-    if (face.landmarks && face.landmarks.length > 0) {
-      ctx.fillStyle = "#ef4444"; // Red
-      face.landmarks.forEach((point) => {
-        ctx.beginPath();
-        ctx.arc(point[0], point[1], 2, 0, 2 * Math.PI);
-        ctx.fill();
-      });
-    }
-  });
 }
 
 // ===== CAPTURE MANAGEMENT =====
@@ -961,6 +937,12 @@ function resetProcess() {
     countdownTimer: null,
     captureInProgress: false,
   });
+
+  // Clean up WebGL renderer
+  if (state.boxRenderer) {
+    state.boxRenderer.destroy();
+    state.boxRenderer = null;
+  }
 
   // Return to main page if completed
   if (!elements.step4.classList.contains("hidden")) {
