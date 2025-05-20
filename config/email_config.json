@@ -4,6 +4,6 @@
     "smtp_server": "smtp.gmail.com",
     "smtp_port": 587,
     "username": "email@gmail.com",
-    "password": "google password",
+    "password": "google app password",
     "enable_notifications": true
 }
