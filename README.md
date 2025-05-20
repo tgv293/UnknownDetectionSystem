@@ -61,6 +61,8 @@ Hệ thống phát hiện người lạ xâm nhập sử dụng công nghệ nh�
 
 * Tải Miniconda tại: [Miniconda Download](https://docs.conda.io/en/latest/miniconda.html)
 * Cài đặt theo hướng dẫn trên trang chủ.
+* Tải models tại [model Download](https://drive.google.com/file/d/1_rRvGY5Oq4ttGgLgK0YnYLlWDu386pV9/view?usp=sharing)
+* Sau đó giải nén vào folder static
 
 ### 2️⃣ **Tạo môi trường ảo với Conda**
 
